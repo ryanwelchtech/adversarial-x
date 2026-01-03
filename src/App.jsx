@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { AnimatePresence } from 'framer-motion'
 import LandingPage from './pages/LandingPage'
 import Dashboard from './pages/Dashboard'
 
@@ -8,13 +7,17 @@ function App() {
 
   return (
     <div className="min-h-screen bg-black">
-      <AnimatePresence mode="wait">
-        {currentPage === 'landing' ? (
-          <LandingPage key="landing" onEnterDashboard={() => setCurrentPage('dashboard')} />
-        ) : (
-          <Dashboard key="dashboard" onBack={() => setCurrentPage('landing')} />
-        )}
-      </AnimatePresence>
+      {currentPage === 'landing' ? (
+        <LandingPage onEnterDashboard={() => {
+          console.log('Navigating to Dashboard...')
+          setCurrentPage('dashboard')
+        }} />
+      ) : (
+        <Dashboard onBack={() => {
+          console.log('Navigating back to Landing...')
+          setCurrentPage('landing')
+        }} />
+      )}
     </div>
   )
 }

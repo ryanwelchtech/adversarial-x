@@ -48,8 +48,9 @@ class ErrorBoundary extends Component {
 }
 
 const Dashboard = ({ onBack }) => {
+  console.log('[Dashboard] Component rendering')
+
   const [isLoading, setIsLoading] = useState(true)
-  const [currentPage, setCurrentPage] = useState('dashboard')
   const [error, setError] = useState(null)
 
   const [activeAttack, setActiveAttack] = useState('fgsm')
@@ -75,10 +76,15 @@ const Dashboard = ({ onBack }) => {
   ], [])
 
   useEffect(() => {
+    console.log('[Dashboard] Mounting...')
     const timer = setTimeout(() => {
+      console.log('[Dashboard] Loading complete')
       setIsLoading(false)
     }, 1000)
-    return () => clearTimeout(timer)
+    return () => {
+      console.log('[Dashboard] Unmounting...')
+      clearTimeout(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -122,6 +128,7 @@ const Dashboard = ({ onBack }) => {
   ].sort((a, b) => b.confidence - a.confidence), [currentConfidence])
 
   if (isLoading) {
+    console.log('[Dashboard] Showing loading state')
     return (
       <div className="min-h-screen bg-black neural-grid flex items-center justify-center">
         <div className="text-center">
@@ -132,6 +139,7 @@ const Dashboard = ({ onBack }) => {
     )
   }
 
+  console.log('[Dashboard] Rendering main content')
   return (
     <ErrorBoundary>
       <motion.div
