@@ -191,15 +191,6 @@ export const fetchDefenseMetrics = async () => {
     return data
   }
 }
-    setCache(cacheKey, data)
-    return data
-  }
-
-  const response = await fetch(`${CONFIG.API_BASE_URL}/defenses`)
-  const data = await response.json()
-  setCache(cacheKey, data)
-  return data
-}
 
 /**
  * Stream real-time attack metrics via WebSocket
