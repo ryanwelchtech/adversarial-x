@@ -108,35 +108,34 @@ const Dashboard = ({ onBack }) => {
         setPredictions(result.predictions)
       }
 
-      if (newConfidence < 50) {
-        setAttackSuccess(prev => Math.min(100, prev + 5))
-        addToLog(`Confidence dropped to ${newConfidence.toFixed(1)}%`, 'danger')
+      if (result.success) {
+        setAttackSuccess(prev => Math.min(100, prev + 2))
+        addToLog(`SUCCESS: ${result.predictions?.[0]?.label || 'unknown'} at ${newConfidence.toFixed(1)}%`, 'danger')
+      } else {
+        addToLog(`Failed: ${newConfidence.toFixed(1)}% confidence`, 'info')
+      }
 
+      if (newConfidence < 50) {
         const newAttacked = new Set()
         const layers = [4, 8, 8, 6, 3]
         layers.forEach((_, li) => {
-          layers[li].forEach((_, ni) => {
+          Array.from({ length: layers[li] }).forEach((_, ni) => {
             if (Math.random() > 0.3) newAttacked.add(`${li}-${ni}`)
           })
         })
         setAttackedNodes(newAttacked)
       } else if (newConfidence < 70) {
         const newAttacked = new Set()
-        const numAttacked = Math.floor((newConfidence / 100) * 10)
+        const numAttacked = Math.floor((1 - newConfidence / 100) * 20)
         for (let i = 0; i < numAttacked; i++) {
           const li = Math.floor(Math.random() * 5)
-          const ni = Math.floor(Math.random() * (li === 0 ? 4 : li === 1 || li === 2 ? 8 : li === 3 ? 6 : 3))
+          const nodeCount = li === 0 ? 4 : li === 1 || li === 2 ? 8 : li === 3 ? 6 : 3
+          const ni = Math.floor(Math.random() * nodeCount)
           newAttacked.add(`${li}-${ni}`)
         }
         setAttackedNodes(newAttacked)
       } else {
         setAttackedNodes(new Set())
-      }
-
-      if (result.success) {
-        addToLog(`SUCCESS: ${result.predictions?.[0]?.label || 'unknown'} confidence at ${newConfidence.toFixed(1)}%`, 'danger')
-      } else {
-        addToLog(`Confidence: ${newConfidence.toFixed(1)}%`, 'info')
       }
 
     } catch (err) {
