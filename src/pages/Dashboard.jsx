@@ -621,6 +621,7 @@ const Dashboard = ({ onBack }) => {
         </div>
       </div>
     </motion.div>
+    </ErrorBoundary>
   )
 }
 
