@@ -1,13 +1,53 @@
-import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import { motion } from 'framer-motion'
 import { ResponsiveContainer, AreaChart, Area } from 'recharts'
 import dataService from '../data/dataService'
 
-// Lazy load D3 for reduced initial bundle size (Apple: progressive loading)
-const loadD3 = () => import('d3')
-
 // Apple UX: Reduced motion for accessibility
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+// Error Boundary Component
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Dashboard Error:', error, errorInfo)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-black flex items-center justify-center p-6">
+          <div className="glass-panel p-8 max-w-md text-center">
+            <div className="w-16 h-16 rounded-full bg-neural-danger/20 flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-neural-danger" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+            </div>
+            <h2 className="text-xl font-semibold text-white mb-2">Visualization Error</h2>
+            <p className="text-white/50 mb-4">{this.state.error?.message || 'An unexpected error occurred'}</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="glass-button"
+            >
+              Reload Dashboard
+            </button>
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 const Dashboard = ({ onBack }) => {
   const [activeAttack, setActiveAttack] = useState('fgsm')
@@ -18,9 +58,13 @@ const Dashboard = ({ onBack }) => {
   const [attackSuccess, setAttackSuccess] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
   const [defenses, setDefenses] = useState([])
+  const [streamError, setStreamError] = useState(null)
   const networkRef = useRef(null)
   const streamRef = useRef(null)
   const lastUpdateRef = useRef(Date.now())
+  const reconnectTimeoutRef = useRef(null)
+  const reconnectAttemptsRef = useRef(0)
+  const maxReconnectAttempts = 3
 
   // Memoized attack configurations to prevent unnecessary re-renders
   const attacks = useMemo(() => [
@@ -37,7 +81,7 @@ const Dashboard = ({ onBack }) => {
         const data = await dataService.fetchDefenseMetrics()
         setDefenses(data.defenses)
       } catch (error) {
-        // Fallback to defaults on error
+        console.warn('Failed to fetch defenses:', error)
         setDefenses([
           { name: 'Adversarial Training', effectiveness: 78, enabled: false },
           { name: 'Input Preprocessing', effectiveness: 45, enabled: true },
@@ -53,7 +97,7 @@ const Dashboard = ({ onBack }) => {
   // Apple UX: Throttled updates (16ms = 60fps) using requestAnimationFrame
   const updateConfidence = useCallback((newValue) => {
     const now = Date.now()
-    if (now - lastUpdateRef.current < 16) return // Skip if less than 16ms
+    if (now - lastUpdateRef.current < 16) return
     lastUpdateRef.current = now
 
     setCurrentConfidence(newValue)
@@ -63,39 +107,96 @@ const Dashboard = ({ onBack }) => {
     })
   }, [])
 
-  // Use data service stream for real-time updates
+  // Initialize and manage WebSocket stream
   useEffect(() => {
-    if (!isRunning) {
-      if (streamRef.current) streamRef.current.close()
-      return
-    }
+    const connectStream = () => {
+      if (streamRef.current) {
+        try {
+          streamRef.current.close()
+        } catch (e) {
+          console.warn('Error closing existing stream:', e)
+        }
+      }
 
-    streamRef.current = dataService.createAttackStream(
-      (message) => {
-        if (message.type === 'confidence') {
-          updateConfidence(message.data.value)
-          if (message.data.value < 50) {
-            setAttackSuccess(prev => Math.min(100, prev + 0.5))
+      console.log('[Stream] Connecting...')
+
+      streamRef.current = dataService.createAttackStream(
+        (message) => {
+          if (message.type === 'confidence') {
+            updateConfidence(message.data.value)
+            if (message.data.value < 50) {
+              setAttackSuccess(prev => Math.min(100, prev + 0.5))
+            }
+          }
+        },
+        (error) => {
+          console.error('[Stream] Error:', error)
+          setStreamError(error.message || 'Stream connection failed')
+          reconnectAttemptsRef.current += 1
+
+          if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 5000)
+            console.log(`[Stream] Reconnecting in ${delay}ms...`)
+            reconnectTimeoutRef.current = setTimeout(connectStream, delay)
           }
         }
-      },
-      (error) => console.error('Stream error:', error)
-    )
+      )
+    }
+
+    connectStream()
 
     return () => {
-      if (streamRef.current) streamRef.current.close()
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
+      if (streamRef.current) {
+        try {
+          streamRef.current.close()
+        } catch (e) {
+          console.warn('Error closing stream on cleanup:', e)
+        }
+        streamRef.current = null
+      }
     }
-  }, [isRunning, updateConfidence])
+  }, [])
+
+  // Send config updates to stream (separate from connection logic)
+  useEffect(() => {
+    if (streamRef.current && streamRef.current.send) {
+      try {
+        streamRef.current.send({
+          type: 'config',
+          epsilon,
+          attack_type: activeAttack
+        })
+      } catch (e) {
+        console.warn('Error sending config:', e)
+      }
+    }
+  }, [epsilon, activeAttack])
+
+  // Handle play/pause
+  useEffect(() => {
+    if (streamRef.current && streamRef.current.send) {
+      try {
+        streamRef.current.send({ type: isRunning ? 'resume' : 'pause' })
+      } catch (e) {
+        console.warn('Error sending pause/resume:', e)
+      }
+    }
+  }, [isRunning])
 
   // Neural Network Canvas Visualization (GPU-accelerated, replaces D3 for performance)
   useEffect(() => {
-    if (!networkRef.current) return
+    if (!networkRef.current) {
+      console.warn('[Canvas] Container ref not available')
+      return
+    }
 
     const container = networkRef.current
-    const width = container.clientWidth
+    const width = container.clientWidth || 800
     const height = 300
 
-    // Use Canvas for GPU acceleration instead of SVG (Apple: 60fps animations)
     let canvas = container.querySelector('canvas')
     if (!canvas) {
       canvas = document.createElement('canvas')
@@ -103,10 +204,16 @@ const Dashboard = ({ onBack }) => {
       canvas.height = height * window.devicePixelRatio
       canvas.style.width = `${width}px`
       canvas.style.height = `${height}px`
+      canvas.style.display = 'block'
       container.appendChild(canvas)
     }
 
     const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      console.error('[Canvas] Could not get 2D context')
+      return
+    }
+
     ctx.scale(window.devicePixelRatio, window.devicePixelRatio)
 
     const layers = [4, 8, 8, 6, 3]
@@ -125,70 +232,74 @@ const Dashboard = ({ onBack }) => {
     })
 
     const render = () => {
-      ctx.clearRect(0, 0, width, height)
+      try {
+        ctx.clearRect(0, 0, width, height)
 
-      // Update attacked nodes periodically (not every frame)
-      if (isRunning && Math.random() > 0.95) {
-        attackedNodes.clear()
-        nodePositions.forEach((layer, li) => {
-          layer.forEach((_, ni) => {
-            if (Math.random() > 0.7) attackedNodes.add(`${li}-${ni}`)
+        // Update attacked nodes periodically (not every frame)
+        if (isRunning && Math.random() > 0.95) {
+          attackedNodes.clear()
+          nodePositions.forEach((layer, li) => {
+            layer.forEach((_, ni) => {
+              if (Math.random() > 0.7) attackedNodes.add(`${li}-${ni}`)
+            })
+          })
+        }
+
+        // Draw connections with GPU-friendly batching
+        ctx.beginPath()
+        layers.forEach((nodeCount, layerIndex) => {
+          if (layerIndex === layers.length - 1) return
+          const nextLayerNodes = layers[layerIndex + 1]
+
+          for (let i = 0; i < nodeCount; i++) {
+            const { x: x1, y: y1 } = nodePositions[layerIndex][i]
+            for (let j = 0; j < nextLayerNodes; j++) {
+              const { x: x2, y: y2 } = nodePositions[layerIndex + 1][j]
+              ctx.moveTo(x1, y1)
+              ctx.lineTo(x2, y2)
+            }
+          }
+        })
+        ctx.strokeStyle = 'rgba(99, 102, 241, 0.15)'
+        ctx.lineWidth = 0.5
+        ctx.stroke()
+
+        // Draw nodes
+        nodePositions.forEach((layer, layerIndex) => {
+          layer.forEach((pos, nodeIndex) => {
+            const isAttacked = attackedNodes.has(`${layerIndex}-${nodeIndex}`)
+
+            ctx.beginPath()
+            ctx.arc(pos.x, pos.y, 8, 0, Math.PI * 2)
+
+            // Gradient fill
+            const gradient = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, 8)
+            if (isAttacked) {
+              gradient.addColorStop(0, '#ef4444')
+              gradient.addColorStop(1, '#991b1b')
+            } else {
+              gradient.addColorStop(0, '#a855f7')
+              gradient.addColorStop(1, '#6366f1')
+            }
+            ctx.fillStyle = gradient
+            ctx.fill()
+
+            ctx.strokeStyle = isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)'
+            ctx.lineWidth = isAttacked ? 2 : 1
+            ctx.stroke()
+
+            // Glow effect for attacked nodes (using shadow)
+            if (isAttacked) {
+              ctx.shadowColor = '#ef4444'
+              ctx.shadowBlur = 10
+              ctx.fill()
+              ctx.shadowBlur = 0
+            }
           })
         })
+      } catch (renderError) {
+        console.error('[Canvas] Render error:', renderError)
       }
-
-      // Draw connections with GPU-friendly batching
-      ctx.beginPath()
-      layers.forEach((nodeCount, layerIndex) => {
-        if (layerIndex === layers.length - 1) return
-        const nextLayerNodes = layers[layerIndex + 1]
-
-        for (let i = 0; i < nodeCount; i++) {
-          const { x: x1, y: y1 } = nodePositions[layerIndex][i]
-          for (let j = 0; j < nextLayerNodes; j++) {
-            const { x: x2, y: y2 } = nodePositions[layerIndex + 1][j]
-            ctx.moveTo(x1, y1)
-            ctx.lineTo(x2, y2)
-          }
-        }
-      })
-      ctx.strokeStyle = 'rgba(99, 102, 241, 0.15)'
-      ctx.lineWidth = 0.5
-      ctx.stroke()
-
-      // Draw nodes
-      nodePositions.forEach((layer, layerIndex) => {
-        layer.forEach((pos, nodeIndex) => {
-          const isAttacked = attackedNodes.has(`${layerIndex}-${nodeIndex}`)
-
-          ctx.beginPath()
-          ctx.arc(pos.x, pos.y, 8, 0, Math.PI * 2)
-
-          // Gradient fill
-          const gradient = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, 8)
-          if (isAttacked) {
-            gradient.addColorStop(0, '#ef4444')
-            gradient.addColorStop(1, '#991b1b')
-          } else {
-            gradient.addColorStop(0, '#a855f7')
-            gradient.addColorStop(1, '#6366f1')
-          }
-          ctx.fillStyle = gradient
-          ctx.fill()
-
-          ctx.strokeStyle = isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)'
-          ctx.lineWidth = isAttacked ? 2 : 1
-          ctx.stroke()
-
-          // Glow effect for attacked nodes (using shadow)
-          if (isAttacked) {
-            ctx.shadowColor = '#ef4444'
-            ctx.shadowBlur = 10
-            ctx.fill()
-            ctx.shadowBlur = 0
-          }
-        })
-      })
 
       if (isRunning && !prefersReducedMotion) {
         animationId = requestAnimationFrame(render)
@@ -202,15 +313,44 @@ const Dashboard = ({ onBack }) => {
     }
   }, [isRunning, epsilon])
 
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-black neural-grid flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 rounded-full border-2 border-neural-primary/30 border-t-neural-primary animate-spin mx-auto mb-4" />
+          <p className="text-white/50">Loading visualization...</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <motion.div
-      className="min-h-screen bg-black neural-grid p-6"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-    >
+    <ErrorBoundary>
+      <motion.div
+        className="min-h-screen bg-black neural-grid p-6"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+      >
       {/* Header */}
       <header className="flex items-center justify-between mb-8">
+        {streamError && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-neural-danger/20 border border-neural-danger/30 text-sm text-neural-danger">
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <span>Stream: {streamError}</span>
+            <button onClick={() => setStreamError(null)} className="ml-2 hover:text-white">
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        )}
+
         <div className="flex items-center gap-4">
           <motion.button
             onClick={onBack}

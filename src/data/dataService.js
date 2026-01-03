@@ -31,7 +31,7 @@
 const CONFIG = {
   API_BASE_URL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
   WS_URL: import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws',
-  USE_MOCK: import.meta.env.VITE_USE_MOCK !== 'false', // Default to mock data
+  USE_MOCK: import.meta.env.VITE_USE_MOCK === undefined || import.meta.env.VITE_USE_MOCK === 'true' || import.meta.env.VITE_USE_MOCK === '',
   CACHE_TTL: 30000, // 30 seconds
 }
 
@@ -86,8 +86,8 @@ const generateMockAttackResult = (attackType, epsilon) => {
  * Response: { predictions: [], confidence: float, is_adversarial: bool }
  */
 export const fetchPrediction = async (imageData, attackConfig = null) => {
-  if (CONFIG.USE_MOCK) {
-    await new Promise(r => setTimeout(r, 50)) // Simulate network latency
+  if (CONFIG.USE_MOCK || !CONFIG.API_BASE_URL || CONFIG.API_BASE_URL.includes('localhost')) {
+    await new Promise(r => setTimeout(r, 50))
     return {
       predictions: [
         { label: 'panda', confidence: attackConfig ? generateMockConfidence(attackConfig.epsilon) : 97.2 },
@@ -99,13 +99,25 @@ export const fetchPrediction = async (imageData, attackConfig = null) => {
     }
   }
 
-  // Real API call
-  const response = await fetch(`${CONFIG.API_BASE_URL}/predict`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image: imageData, attack: attackConfig }),
-  })
-  return response.json()
+  try {
+    const response = await fetch(`${CONFIG.API_BASE_URL}/predict`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: imageData, attack: attackConfig }),
+    })
+    return response.json()
+  } catch (error) {
+    console.warn('API prediction failed, falling back to mock:', error)
+    return {
+      predictions: [
+        { label: 'panda', confidence: attackConfig ? generateMockConfidence(attackConfig.epsilon) : 97.2 },
+        { label: 'gibbon', confidence: 2.1 },
+        { label: 'macaque', confidence: Math.random() * 5 },
+      ],
+      isAdversarial: !!attackConfig,
+      timestamp: Date.now(),
+    }
+  }
 }
 
 /**
@@ -117,21 +129,26 @@ export const fetchPrediction = async (imageData, attackConfig = null) => {
  * Response: { adversarial_image: base64, original_pred: {}, adversarial_pred: {}, perturbation: {} }
  */
 export const executeAttack = async (attackType, epsilon, imageData = null) => {
-  if (CONFIG.USE_MOCK) {
+  if (CONFIG.USE_MOCK || !CONFIG.API_BASE_URL || CONFIG.API_BASE_URL.includes('localhost')) {
     await new Promise(r => setTimeout(r, 100))
     return generateMockAttackResult(attackType, epsilon)
   }
 
-  const response = await fetch(`${CONFIG.API_BASE_URL}/attack`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ attack_type: attackType, epsilon, image: imageData }),
-  })
-  return response.json()
+  try {
+    const response = await fetch(`${CONFIG.API_BASE_URL}/attack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ attack_type: attackType, epsilon, image: imageData }),
+    })
+    return response.json()
+  } catch (error) {
+    console.warn('API attack failed, falling back to mock:', error)
+    return generateMockAttackResult(attackType, epsilon)
+  }
 }
 
 /**
- * Get defense effectiveness metrics
+ * Fetch defense effectiveness metrics
  *
  * REAL IMPLEMENTATION:
  * GET /api/defenses
@@ -142,7 +159,7 @@ export const fetchDefenseMetrics = async () => {
   const cached = getCached(cacheKey)
   if (cached) return cached
 
-  if (CONFIG.USE_MOCK) {
+  if (CONFIG.USE_MOCK || !CONFIG.API_BASE_URL || CONFIG.API_BASE_URL.includes('localhost')) {
     const data = {
       defenses: [
         { name: 'Adversarial Training', effectiveness: 78, overhead: 2.3, enabled: false },
@@ -151,6 +168,29 @@ export const fetchDefenseMetrics = async () => {
         { name: 'Feature Squeezing', effectiveness: 55, overhead: 0.8, enabled: true },
       ],
     }
+    setCache(cacheKey, data)
+    return data
+  }
+
+  try {
+    const response = await fetch(`${CONFIG.API_BASE_URL}/defenses`)
+    const data = await response.json()
+    setCache(cacheKey, data)
+    return data
+  } catch (error) {
+    console.warn('API defenses fetch failed, using mock:', error)
+    const data = {
+      defenses: [
+        { name: 'Adversarial Training', effectiveness: 78, overhead: 2.3, enabled: false },
+        { name: 'Input Preprocessing', effectiveness: 45, overhead: 0.5, enabled: true },
+        { name: 'Defensive Distillation', effectiveness: 62, overhead: 1.8, enabled: false },
+        { name: 'Feature Squeezing', effectiveness: 55, overhead: 0.8, enabled: true },
+      ],
+    }
+    setCache(cacheKey, data)
+    return data
+  }
+}
     setCache(cacheKey, data)
     return data
   }
@@ -169,8 +209,8 @@ export const fetchDefenseMetrics = async () => {
  * Messages: { type: 'confidence'|'attack_result', data: {} }
  */
 export const createAttackStream = (onMessage, onError) => {
-  if (CONFIG.USE_MOCK) {
-    // Mock streaming with intervals
+  if (CONFIG.USE_MOCK || !CONFIG.WS_URL || CONFIG.WS_URL.includes('localhost')) {
+    console.log('[Stream] Using mock data (no backend required)')
     const interval = setInterval(() => {
       onMessage({
         type: 'confidence',
@@ -184,11 +224,31 @@ export const createAttackStream = (onMessage, onError) => {
     }
   }
 
-  // Real WebSocket connection
-  const ws = new WebSocket(`${CONFIG.WS_URL}/attacks`)
-  ws.onmessage = (event) => onMessage(JSON.parse(event.data))
-  ws.onerror = onError
-  return ws
+  try {
+    console.log('[Stream] Connecting to:', CONFIG.WS_URL)
+    const ws = new WebSocket(`${CONFIG.WS_URL}/attacks`)
+    ws.onmessage = (event) => onMessage(JSON.parse(event.data))
+    ws.onerror = (error) => {
+      console.warn('[Stream] WebSocket error, falling back to mock:', error)
+      onError(error)
+    }
+    ws.onclose = () => {
+      console.log('[Stream] Connection closed')
+    }
+    return ws
+  } catch (error) {
+    console.warn('[Stream] Failed to create WebSocket, using mock:', error)
+    const interval = setInterval(() => {
+      onMessage({
+        type: 'confidence',
+        data: { value: generateMockConfidence(0.03), timestamp: Date.now() },
+      })
+    }, 100)
+    return {
+      close: () => clearInterval(interval),
+      send: () => {},
+    }
+  }
 }
 
 /**
@@ -199,7 +259,7 @@ export const createAttackStream = (onMessage, onError) => {
  * Response: { layers: [{ type: string, units: int, activation: string }] }
  */
 export const fetchModelArchitecture = async () => {
-  if (CONFIG.USE_MOCK) {
+  if (CONFIG.USE_MOCK || !CONFIG.API_BASE_URL || CONFIG.API_BASE_URL.includes('localhost')) {
     return {
       layers: [
         { type: 'input', units: 784, activation: null },
@@ -211,8 +271,21 @@ export const fetchModelArchitecture = async () => {
     }
   }
 
-  const response = await fetch(`${CONFIG.API_BASE_URL}/model/architecture`)
-  return response.json()
+  try {
+    const response = await fetch(`${CONFIG.API_BASE_URL}/model/architecture`)
+    return response.json()
+  } catch (error) {
+    console.warn('API architecture fetch failed, using mock:', error)
+    return {
+      layers: [
+        { type: 'input', units: 784, activation: null },
+        { type: 'dense', units: 256, activation: 'relu' },
+        { type: 'dense', units: 128, activation: 'relu' },
+        { type: 'dense', units: 64, activation: 'relu' },
+        { type: 'output', units: 10, activation: 'softmax' },
+      ],
+    }
+  }
 }
 
 // ============================================
