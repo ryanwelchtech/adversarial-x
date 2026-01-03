@@ -81,8 +81,9 @@ const Dashboard = ({ onBack }) => {
       console.log(`[Dashboard] Running ${activeAttack} attack (ε=${epsilon}, seed=${newSeed})`)
       addToLog(`${activeAttack.toUpperCase()} attack with ε=${epsilon.toFixed(3)}`, 'attack')
 
-      const tfService = await import('../services/tfService')
-      const result = await tfService.executeAttack(activeAttack, epsilon, null, newSeed)
+      const tfServiceModule = await import('../services/tfService')
+      const tfService = tfServiceModule.default
+      const result = await tfService.executeAttack(activeAttack, epsilon, newSeed)
 
       console.log('[Dashboard] Attack result:', result)
 
@@ -162,12 +163,13 @@ const Dashboard = ({ onBack }) => {
 
     const init = async () => {
       try {
-        const tfService = await import('../services/tfService')
+        const tfServiceModule = await import('../services/tfService')
+        const tfService = tfServiceModule.default
         await tfService.loadModel()
         setModelLoaded(true)
         addToLog('Model loaded. Ready.', 'success')
 
-        const initialResult = await tfService.executeAttack('fgsm', 0, null, 42)
+        const initialResult = await tfService.executeAttack('fgsm', 0, 42)
         setOriginalPrediction({
           label: initialResult.originalPrediction,
           confidence: initialResult.originalConfidence
