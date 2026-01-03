@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, Component } from 'react'
 import { motion } from 'framer-motion'
-import { ResponsiveContainer, AreaChart, Area } from 'recharts'
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis } from 'recharts'
 import dataService from '../data/dataService'
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
