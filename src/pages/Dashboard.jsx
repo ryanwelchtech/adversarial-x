@@ -61,6 +61,7 @@ const Dashboard = ({ onBack }) => {
   const [confidenceHistory, setConfidenceHistory] = useState([])
   const [attackSuccess, setAttackSuccess] = useState(0)
   const [predictions, setPredictions] = useState([])
+  const [attackedNodes, setAttackedNodes] = useState(new Set())
   const [defenses, setDefenses] = useState([
     { name: 'Adversarial Training', effectiveness: 78, enabled: false },
     { name: 'Input Preprocessing', effectiveness: 45, enabled: true },
@@ -110,14 +111,32 @@ const Dashboard = ({ onBack }) => {
       if (newConfidence < 50) {
         setAttackSuccess(prev => Math.min(100, prev + 5))
         addToLog(`Confidence dropped to ${newConfidence.toFixed(1)}%`, 'danger')
+
+        const newAttacked = new Set()
+        const layers = [4, 8, 8, 6, 3]
+        layers.forEach((_, li) => {
+          layers[li].forEach((_, ni) => {
+            if (Math.random() > 0.3) newAttacked.add(`${li}-${ni}`)
+          })
+        })
+        setAttackedNodes(newAttacked)
+      } else if (newConfidence < 70) {
+        const newAttacked = new Set()
+        const numAttacked = Math.floor((newConfidence / 100) * 10)
+        for (let i = 0; i < numAttacked; i++) {
+          const li = Math.floor(Math.random() * 5)
+          const ni = Math.floor(Math.random() * (li === 0 ? 4 : li === 1 || li === 2 ? 8 : li === 3 ? 6 : 3))
+          newAttacked.add(`${li}-${ni}`)
+        }
+        setAttackedNodes(newAttacked)
       } else {
-        addToLog(`Confidence: ${newConfidence.toFixed(1)}%`, 'info')
+        setAttackedNodes(new Set())
       }
 
       if (result.success) {
-        addToLog('Attack SUCCESSFUL - misclassification achieved!', 'danger')
+        addToLog(`SUCCESS: ${result.predictions?.[0]?.label || 'unknown'} confidence at ${newConfidence.toFixed(1)}%`, 'danger')
       } else {
-        addToLog('Attack failed - model maintained prediction', 'success')
+        addToLog(`Confidence: ${newConfidence.toFixed(1)}%`, 'info')
       }
 
     } catch (err) {
@@ -373,6 +392,13 @@ const Dashboard = ({ onBack }) => {
                       <stop offset="0%" stopColor="#ef4444" />
                       <stop offset="100%" stopColor="#991b1b" />
                     </radialGradient>
+                    <filter id="glow">
+                      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+                      <feMerge>
+                        <feMergeNode in="coloredBlur"/>
+                        <feMergeNode in="SourceGraphic"/>
+                      </feMerge>
+                    </filter>
                   </defs>
                   {(() => {
                     const layers = [4, 8, 8, 6, 3]
@@ -382,7 +408,7 @@ const Dashboard = ({ onBack }) => {
                       return Array.from({ length: nodeCount }, (_, i) => ({
                         x,
                         y: (300 / (nodeCount + 1)) * (i + 1),
-                        isAttacked: isRunning && Math.random() > 0.6
+                        isAttacked: attackedNodes.has(`${layerIndex}-${i}`) || (isRunning && Math.random() > 0.9)
                       }))
                     })
                     return (
@@ -397,27 +423,29 @@ const Dashboard = ({ onBack }) => {
                                   y1={node.y}
                                   x2={nextNode.x}
                                   y2={nextNode.y}
-                                  stroke={node.isAttacked || nextNode.isAttacked ? 'rgba(239, 68, 68, 0.3)' : 'rgba(99, 102, 241, 0.15)'}
-                                  strokeWidth={node.isAttacked || nextNode.isAttacked ? '1' : '0.5'}
+                                  stroke={node.isAttacked || nextNode.isAttacked ? 'rgba(239, 68, 68, 0.4)' : 'rgba(99, 102, 241, 0.15)'}
+                                  strokeWidth={node.isAttacked || nextNode.isAttacked ? '1.5' : '0.5'}
                                 />
                               ))}
                               <circle
                                 cx={node.x}
                                 cy={node.y}
-                                r={node.isAttacked ? 10 : 8}
+                                r={node.isAttacked ? 12 : 8}
                                 fill={node.isAttacked ? 'url(#attackedGradient)' : 'url(#nodeGradient)'}
                                 stroke={node.isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)'}
                                 strokeWidth={node.isAttacked ? 2 : 1}
+                                filter={node.isAttacked ? 'url(#glow)' : ''}
+                                className={node.isAttacked ? 'animate-pulse' : ''}
                               />
                               {node.isAttacked && (
                                 <circle
                                   cx={node.x}
                                   cy={node.y}
-                                  r={15}
+                                  r={20}
                                   fill="none"
                                   stroke="#ef4444"
-                                  strokeWidth="1"
-                                  opacity="0.5"
+                                  strokeWidth="1.5"
+                                  opacity="0.6"
                                   className="animate-ping"
                                 />
                               )}
@@ -497,15 +525,16 @@ const Dashboard = ({ onBack }) => {
               <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Classification Output</h3>
               <div className="space-y-3">
                 {(predictions.length > 0 ? predictions : [
-                  { label: 'Loading...', confidence: 0, original: true },
+                  { label: 'tench', confidence: 97.2, original: true },
                   { label: '-', confidence: 0, original: false },
                   { label: '-', confidence: 0, original: false }
-                ]).map((item, index) => (
-                  <div key={item.label} className={`p-3 rounded-xl ${index === 0 ? 'bg-white/10 border border-white/20' : 'bg-white/5'}`}>
+                ]).slice(0, 5).map((item, index) => (
+                  <div key={item.label + index} className={`p-3 rounded-xl ${index === 0 ? 'bg-white/10 border border-white/20' : 'bg-white/5'}`}>
                     <div className="flex justify-between mb-2">
                       <span className={`text-sm ${index === 0 ? 'text-white font-medium' : 'text-white/60'}`}>
                         {item.label}
                         {item.original && index === 0 && <span className="ml-2 text-xs text-neural-success">✓ Original</span>}
+                        {index === 0 && !item.original && <span className="ml-2 text-xs text-neural-warning">New Top</span>}
                       </span>
                       <span className={`text-sm font-mono ${index === 0 ? 'text-neural-primary' : 'text-white/40'}`}>
                         {item.confidence > 0 ? `${item.confidence.toFixed(1)}%` : '-'}
