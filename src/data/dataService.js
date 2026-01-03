@@ -32,6 +32,7 @@ const CONFIG = {
   API_BASE_URL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
   WS_URL: import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws',
   USE_MOCK: import.meta.env.VITE_USE_MOCK === undefined || import.meta.env.VITE_USE_MOCK === 'true' || import.meta.env.VITE_USE_MOCK === '',
+  USE_TFJS: import.meta.env.VITE_USE_TFJS === 'true',
   CACHE_TTL: 30000, // 30 seconds
 }
 
@@ -86,6 +87,16 @@ const generateMockAttackResult = (attackType, epsilon) => {
  * Response: { predictions: [], confidence: float, is_adversarial: bool }
  */
 export const fetchPrediction = async (imageData, attackConfig = null) => {
+  if (CONFIG.USE_TFJS) {
+    try {
+      console.log('[DataService] Using TensorFlow.js for prediction')
+      const tfService = await import('../services/tfService')
+      return await tfService.predict(null)
+    } catch (error) {
+      console.warn('[DataService] TF.js failed, falling back to mock:', error)
+    }
+  }
+
   if (CONFIG.USE_MOCK || !CONFIG.API_BASE_URL || CONFIG.API_BASE_URL.includes('localhost')) {
     await new Promise(r => setTimeout(r, 50))
     return {
@@ -129,6 +140,16 @@ export const fetchPrediction = async (imageData, attackConfig = null) => {
  * Response: { adversarial_image: base64, original_pred: {}, adversarial_pred: {}, perturbation: {} }
  */
 export const executeAttack = async (attackType, epsilon, imageData = null) => {
+  if (CONFIG.USE_TFJS) {
+    try {
+      console.log(`[DataService] Using TensorFlow.js for ${attackType} attack`)
+      const tfService = await import('../services/tfService')
+      return await tfService.executeAttack(attackType, epsilon, null)
+    } catch (error) {
+      console.warn('[DataService] TF.js attack failed, falling back to mock:', error)
+    }
+  }
+
   if (CONFIG.USE_MOCK || !CONFIG.API_BASE_URL || CONFIG.API_BASE_URL.includes('localhost')) {
     await new Promise(r => setTimeout(r, 100))
     return generateMockAttackResult(attackType, epsilon)
@@ -200,6 +221,55 @@ export const fetchDefenseMetrics = async () => {
  * Messages: { type: 'confidence'|'attack_result', data: {} }
  */
 export const createAttackStream = (onMessage, onError) => {
+  if (CONFIG.USE_TFJS) {
+    console.log('[Stream] Using TensorFlow.js for real-time predictions')
+    let isRunning = true
+    let epsilon = 0.03
+    let attackType = 'fgsm'
+
+    const updatePrediction = async () => {
+      if (!isRunning) return
+
+      try {
+        const tfService = await import('../services/tfService')
+        const result = await tfService.executeAttack(attackType, epsilon, null)
+
+        onMessage({
+          type: 'attack_result',
+          data: {
+            value: result.predictions?.[0]?.confidence || 97.2,
+            ...result
+          }
+        })
+      } catch (error) {
+        console.warn('[Stream] TF.js stream error:', error)
+        onMessage({
+          type: 'confidence',
+          data: { value: generateMockConfidence(epsilon), timestamp: Date.now() },
+        })
+      }
+    }
+
+    const interval = setInterval(updatePrediction, 200)
+
+    return {
+      close: () => {
+        isRunning = false
+        clearInterval(interval)
+      },
+      send: (data) => {
+        if (data.type === 'config') {
+          epsilon = data.epsilon ?? epsilon
+          attackType = data.attack_type ?? attackType
+        } else if (data.type === 'pause') {
+          isRunning = false
+        } else if (data.type === 'resume') {
+          isRunning = true
+        }
+      },
+    }
+  }
+
   if (CONFIG.USE_MOCK || !CONFIG.WS_URL || CONFIG.WS_URL.includes('localhost')) {
     console.log('[Stream] Using mock data (no backend required)')
     const interval = setInterval(() => {
