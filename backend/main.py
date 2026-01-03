@@ -6,6 +6,8 @@ FastAPI server providing:
 - WebSocket streaming for real-time attack simulations
 - Adversarial attack execution (FGSM, PGD, C&W, DeepFool)
 
+Optimized for low latency and Apple UX principles.
+
 Run with: uvicorn main:app --reload --port 8000
 """
 
@@ -14,10 +16,14 @@ import random
 import time
 from typing import Optional
 from contextlib import asynccontextmanager
+from functools import lru_cache
+from collections import deque
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
+from starlette.responses import JSONResponse
 
 # ============================================
 # MODELS
@@ -49,6 +55,16 @@ defenses = [
 ]
 
 active_connections: list[WebSocket] = []
+connection_configs: dict[int, dict] = {}
+
+# Performance: Pre-computed values
+_SUCCESS_RATES = {"fgsm": 0.85, "pgd": 0.92, "cw": 0.96, "deepfool": 0.89}
+_BASE_CONFIDENCE = 97.2
+
+@lru_cache(maxsize=1)
+def get_defense_boost_cached() -> float:
+    """Cached defense boost calculation for performance."""
+    return sum(d["effectiveness"] * 0.1 for d in defenses if d["enabled"])
 
 # ============================================
 # MOCK ML FUNCTIONS (Replace with real models)
@@ -56,21 +72,15 @@ active_connections: list[WebSocket] = []
 
 def generate_confidence(epsilon: float, defense_boost: float = 0) -> float:
     """Simulate model confidence degradation under attack."""
-    base_confidence = 97.2
     degradation = epsilon * 800
     noise = (random.random() - 0.5) * 10
-    confidence = base_confidence - degradation + noise + defense_boost
+    confidence = _BASE_CONFIDENCE - degradation + noise + defense_boost
     return max(5, min(100, confidence))
 
 def execute_attack(attack_type: str, epsilon: float) -> dict:
     """Simulate adversarial attack execution."""
-    success_rates = {"fgsm": 0.85, "pgd": 0.92, "cw": 0.96, "deepfool": 0.89}
-    base_rate = success_rates.get(attack_type, 0.85)
-
-    # Calculate defense effectiveness
-    defense_boost = sum(
-        d["effectiveness"] * 0.1 for d in defenses if d["enabled"]
-    )
+    base_rate = _SUCCESS_RATES.get(attack_type, 0.85)
+    defense_boost = get_defense_boost_cached()
 
     return {
         "success": random.random() < (base_rate + epsilon * 2 - defense_boost * 0.01),
@@ -82,8 +92,9 @@ def execute_attack(attack_type: str, epsilon: float) -> dict:
         "timestamp": int(time.time() * 1000),
     }
 
+@lru_cache(maxsize=1)
 def get_model_architecture() -> dict:
-    """Return neural network architecture for visualization."""
+    """Return neural network architecture for visualization (cached)."""
     return {
         "layers": [
             {"type": "input", "units": 784, "activation": None},
@@ -115,15 +126,29 @@ app = FastAPI(
     description="Adversarial ML Attack Simulation Backend",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
 )
 
-# CORS for frontend
+# Performance: GZip compression for responses
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
+# CORS for frontend (production + development)
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "https://ryanwelchtech.github.io",
+    "https://adversarial-x.vercel.app",
+    "https://adversarial-x*.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "https://ryanwelchtech.github.io"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # ============================================
@@ -136,7 +161,10 @@ async def root():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "healthy", "timestamp": int(time.time() * 1000)}
+    return JSONResponse(
+        content={"status": "healthy", "timestamp": int(time.time() * 1000)},
+        headers={"Cache-Control": "no-cache"}
+    )
 
 @app.post("/api/predict")
 async def predict(request: PredictionRequest):
@@ -167,7 +195,10 @@ async def attack(config: AttackConfig):
 @app.get("/api/defenses")
 async def get_defenses():
     """Get available defense mechanisms and their status."""
-    return {"defenses": defenses}
+    return JSONResponse(
+        content={"defenses": defenses},
+        headers={"Cache-Control": "max-age=60"}
+    )
 
 @app.post("/api/defenses/toggle")
 async def toggle_defense(toggle: DefenseToggle):
@@ -175,8 +206,15 @@ async def toggle_defense(toggle: DefenseToggle):
     for defense in defenses:
         if defense["name"] == toggle.name:
             defense["enabled"] = toggle.enabled
-            return {"success": True, "defense": defense}
-    return {"success": False, "error": "Defense not found"}
+            get_defense_boost_cached.cache_clear()
+            return JSONResponse(
+                content={"success": True, "defense": defense},
+                headers={"Cache-Control": "no-cache"}
+            )
+    return JSONResponse(
+        content={"success": False, "error": "Defense not found"},
+        status_code=404
+    )
 
 @app.get("/api/model/architecture")
 async def model_architecture():
@@ -184,70 +222,72 @@ async def model_architecture():
     return get_model_architecture()
 
 # ============================================
-# WEBSOCKET STREAMING
+# WEBSOCKET STREAMING (Optimized for Low Latency)
 # ============================================
 
 @app.websocket("/ws/attacks")
 async def websocket_attacks(websocket: WebSocket):
-    """Stream real-time attack simulation data."""
+    """Stream real-time attack simulation data with optimized latency."""
     await websocket.accept()
     active_connections.append(websocket)
 
-    try:
-        # Default attack config
-        epsilon = 0.03
-        attack_type = "fgsm"
-        is_running = True
+    conn_id = id(websocket)
+    connection_configs[conn_id] = {"epsilon": 0.03, "attack_type": "fgsm", "is_running": True}
 
+    try:
         async def send_updates():
-            while is_running:
-                # Calculate defense boost
-                defense_boost = sum(
-                    d["effectiveness"] * 0.05 for d in defenses if d["enabled"]
+            while connection_configs[conn_id]["is_running"]:
+                defense_boost = get_defense_boost_cached() * 0.5
+                confidence = generate_confidence(
+                    connection_configs[conn_id]["epsilon"],
+                    defense_boost
                 )
 
-                # Send confidence update
-                confidence = generate_confidence(epsilon, defense_boost)
-                await websocket.send_json({
-                    "type": "confidence",
-                    "data": {
-                        "value": confidence,
-                        "timestamp": int(time.time() * 1000),
-                    }
-                })
-
-                # Occasionally send attack result
-                if random.random() > 0.9:
-                    result = execute_attack(attack_type, epsilon)
+                try:
                     await websocket.send_json({
-                        "type": "attack_result",
-                        "data": result,
+                        "type": "confidence",
+                        "data": {"value": confidence, "timestamp": int(time.time() * 1000)},
                     })
 
-                await asyncio.sleep(0.1)  # 10 updates per second
+                    if random.random() > 0.9:
+                        result = execute_attack(
+                            connection_configs[conn_id]["attack_type"],
+                            connection_configs[conn_id]["epsilon"]
+                        )
+                        await websocket.send_json({
+                            "type": "attack_result",
+                            "data": result,
+                        })
+                except Exception:
+                    break
 
-        # Start sending updates in background
+                await asyncio.sleep(0.05)
+
         update_task = asyncio.create_task(send_updates())
 
-        # Listen for client messages
         while True:
-            data = await websocket.receive_json()
+            try:
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
+                config = connection_configs[conn_id]
 
-            if data.get("type") == "config":
-                epsilon = data.get("epsilon", epsilon)
-                attack_type = data.get("attack_type", attack_type)
-            elif data.get("type") == "pause":
-                is_running = False
-            elif data.get("type") == "resume":
-                is_running = True
-                update_task = asyncio.create_task(send_updates())
+                if data.get("type") == "config":
+                    config["epsilon"] = data.get("epsilon", config["epsilon"])
+                    config["attack_type"] = data.get("attack_type", config["attack_type"])
+                elif data.get("type") == "pause":
+                    config["is_running"] = False
+                elif data.get("type") == "resume":
+                    config["is_running"] = True
+            except asyncio.TimeoutError:
+                continue
 
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        pass
     except Exception as e:
         print(f"WebSocket error: {e}")
+    finally:
         if websocket in active_connections:
             active_connections.remove(websocket)
+        connection_configs.pop(conn_id, None)
 
 # ============================================
 # PRODUCTION INTEGRATION EXAMPLES
