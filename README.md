@@ -9,7 +9,7 @@ Interactive adversarial machine learning attack simulation platform. Visualize n
 
 ## Live Demo
 
-🔗 **[View Live Demo](https://ryanwelchtech.github.io/adversarial-x/)**
+🔗 **[View Live Demo](https://adversarial-x.vercel.app/)**
 
 ## Features
 
