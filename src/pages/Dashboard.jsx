@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, Component } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, Component, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis } from 'recharts'
 
