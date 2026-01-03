@@ -133,10 +133,22 @@ const Dashboard = ({ onBack }) => {
     } catch (err) {
       console.error('Init error:', err)
       const initPred = generatePrediction(42, false)
+      const layers = [4, 8, 8, 6, 3]
+      const layerSpacing = 600 / (layers.length + 1)
+      const fallbackNetwork = layers.map((nodeCount, layerIndex) => {
+        const x = layerSpacing * (layerIndex + 1)
+        return Array.from({ length: nodeCount }, (_, i) => ({
+          x,
+          y: (300 / (nodeCount + 1)) * (i + 1),
+          isAttacked: false
+        }))
+      })
+
       setOriginalPrediction(initPred.top)
       setPredictions(initPred.all)
       setConfidenceHistory([{ time: 0, value: 97.2, attack: 'init', success: false }])
-      setNeuralNetwork([[0,0,0,0].map((_, i) => ({ x: 120 + i * 120, y: 75 + (i % 2) * 75, isAttacked: false }))])
+      setNeuralNetwork(fallbackNetwork)
+      setAttackLog([{ type: 'info', message: 'Simulation initialized. Click Start to begin.', time: Date.now() }])
       setIsLoading(false)
     }
   }, [])
