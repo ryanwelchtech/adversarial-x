@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo, Component } from 'react'
 import { motion } from 'framer-motion'
 import { ResponsiveContainer, AreaChart, Area } from 'recharts'
 import dataService from '../data/dataService'
@@ -7,7 +7,7 @@ import dataService from '../data/dataService'
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
 // Error Boundary Component
-class ErrorBoundary extends React.Component {
+class ErrorBoundary extends Component {
   constructor(props) {
     super(props)
     this.state = { hasError: false, error: null }
