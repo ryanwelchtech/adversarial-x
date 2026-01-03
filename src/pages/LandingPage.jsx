@@ -1,16 +1,28 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, useScroll, useTransform } from 'framer-motion'
+import { motion, useScroll, useTransform, AnimatePresence } from 'framer-motion'
 
 const LandingPage = ({ onEnterDashboard }) => {
   const containerRef = useRef(null)
   const { scrollYProgress } = useScroll({ target: containerRef })
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 })
+  const [isReady, setIsReady] = useState(false)
 
   const heroOpacity = useTransform(scrollYProgress, [0, 0.3], [1, 0])
   const heroScale = useTransform(scrollYProgress, [0, 0.3], [1, 0.95])
   const heroY = useTransform(scrollYProgress, [0, 0.3], [0, -50])
 
+  // Defer animations until after first paint
   useEffect(() => {
+    const timer = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setIsReady(true)
+      })
+    })
+    return () => cancelAnimationFrame(timer)
+  }, [])
+
+  useEffect(() => {
+    if (!isReady) return
     const handleMouseMove = (e) => {
       setMousePosition({
         x: (e.clientX / window.innerWidth - 0.5) * 30,
@@ -19,7 +31,7 @@ const LandingPage = ({ onEnterDashboard }) => {
     }
     window.addEventListener('mousemove', handleMouseMove)
     return () => window.removeEventListener('mousemove', handleMouseMove)
-  }, [])
+  }, [isReady])
 
   const features = [
     {
@@ -67,6 +79,27 @@ const LandingPage = ({ onEnterDashboard }) => {
     { name: 'DeepFool', epsilon: 'Min', successRate: 97 },
   ]
 
+  // Loading skeleton component
+  if (!isReady) {
+    return (
+      <div className="min-h-screen bg-black neural-grid flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-neural-primary to-neural-accent flex items-center justify-center animate-pulse">
+            <svg className="w-8 h-8 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="8" r="4"/>
+              <circle cx="6" cy="16" r="3"/>
+              <circle cx="18" cy="16" r="3"/>
+              <line x1="12" y1="12" x2="8" y2="14"/>
+              <line x1="12" y1="12" x2="16" y2="14"/>
+            </svg>
+          </div>
+          <div className="h-6 w-48 mx-auto bg-white/5 rounded-lg animate-pulse mb-3"></div>
+          <div className="h-4 w-32 mx-auto bg-white/5 rounded-lg animate-pulse"></div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <motion.div
       ref={containerRef}
@@ -74,7 +107,7 @@ const LandingPage = ({ onEnterDashboard }) => {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.5 }}
+      transition={{ duration: 0.4 }}
     >
       {/* Floating Orbs */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
@@ -86,6 +119,7 @@ const LandingPage = ({ onEnterDashboard }) => {
             x: mousePosition.x * 0.5,
             y: mousePosition.y * 0.5,
           }}
+          initial={{ opacity: 0, scale: 0.8 }}
           animate={{
             scale: [1, 1.2, 1],
             opacity: [0.3, 0.5, 0.3],
@@ -100,6 +134,7 @@ const LandingPage = ({ onEnterDashboard }) => {
             x: mousePosition.x * -0.3,
             y: mousePosition.y * -0.3,
           }}
+          initial={{ opacity: 0, scale: 0.8 }}
           animate={{
             scale: [1.2, 1, 1.2],
             opacity: [0.4, 0.2, 0.4],
@@ -114,6 +149,7 @@ const LandingPage = ({ onEnterDashboard }) => {
             x: mousePosition.x * 0.2,
             y: mousePosition.y * 0.2,
           }}
+          initial={{ opacity: 0, scale: 0.8 }}
           animate={{
             scale: [1, 1.3, 1],
             opacity: [0.2, 0.4, 0.2],
