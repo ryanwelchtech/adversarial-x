@@ -85,8 +85,8 @@ const Dashboard = ({ onBack }) => {
       ? 20 + seededRandom(seed + 1) * 50
       : 85 + seededRandom(seed + 1) * 14
 
-    const alternatives = IMAGENET_CLASSES.filter((_, i) => i !== baseIdx)
-      .sort(() => seededRandom(seed + i + 2) - 0.5)
+    const alternatives = IMAGENET_CLASSES.filter((_, idx) => idx !== baseIdx)
+      .sort(() => Math.random() - 0.5)
       .slice(0, 4)
       .map((label, i) => ({
         label,
