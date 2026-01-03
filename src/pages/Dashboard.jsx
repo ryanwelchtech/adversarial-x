@@ -1,7 +1,13 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react'
 import { motion } from 'framer-motion'
-import * as d3 from 'd3'
-import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, AreaChart, Area } from 'recharts'
+import { ResponsiveContainer, AreaChart, Area } from 'recharts'
+import dataService from '../data/dataService'
+
+// Lazy load D3 for reduced initial bundle size (Apple: progressive loading)
+const loadD3 = () => import('d3')
+
+// Apple UX: Reduced motion for accessibility
+const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
 const Dashboard = ({ onBack }) => {
   const [activeAttack, setActiveAttack] = useState('fgsm')
@@ -10,50 +16,78 @@ const Dashboard = ({ onBack }) => {
   const [confidenceHistory, setConfidenceHistory] = useState([])
   const [currentConfidence, setCurrentConfidence] = useState(97.2)
   const [attackSuccess, setAttackSuccess] = useState(0)
+  const [isLoading, setIsLoading] = useState(true)
+  const [defenses, setDefenses] = useState([])
   const networkRef = useRef(null)
+  const streamRef = useRef(null)
+  const lastUpdateRef = useRef(Date.now())
 
-  const attacks = [
+  // Memoized attack configurations to prevent unnecessary re-renders
+  const attacks = useMemo(() => [
     { id: 'fgsm', name: 'FGSM', description: 'Fast Gradient Sign Method', color: '#ef4444' },
     { id: 'pgd', name: 'PGD', description: 'Projected Gradient Descent', color: '#f59e0b' },
     { id: 'cw', name: 'C&W', description: 'Carlini & Wagner L2', color: '#8b5cf6' },
     { id: 'deepfool', name: 'DeepFool', description: 'Minimal Perturbation', color: '#06b6d4' },
-  ]
+  ], [])
 
-  const defenses = [
-    { name: 'Adversarial Training', effectiveness: 78, enabled: false },
-    { name: 'Input Preprocessing', effectiveness: 45, enabled: true },
-    { name: 'Defensive Distillation', effectiveness: 62, enabled: false },
-    { name: 'Feature Squeezing', effectiveness: 55, enabled: true },
-  ]
-
-  // Simulate real-time confidence degradation
+  // Fetch defense metrics on mount (with caching)
   useEffect(() => {
-    if (!isRunning) return
+    const fetchDefenses = async () => {
+      try {
+        const data = await dataService.fetchDefenseMetrics()
+        setDefenses(data.defenses)
+      } catch (error) {
+        // Fallback to defaults on error
+        setDefenses([
+          { name: 'Adversarial Training', effectiveness: 78, enabled: false },
+          { name: 'Input Preprocessing', effectiveness: 45, enabled: true },
+          { name: 'Defensive Distillation', effectiveness: 62, enabled: false },
+          { name: 'Feature Squeezing', effectiveness: 55, enabled: true },
+        ])
+      }
+      setIsLoading(false)
+    }
+    fetchDefenses()
+  }, [])
 
-    const interval = setInterval(() => {
-      setConfidenceHistory(prev => {
-        const lastConfidence = prev.length > 0 ? prev[prev.length - 1].value : 97.2
-        const degradation = epsilon * 150 * (Math.random() * 0.5 + 0.75)
-        const noise = (Math.random() - 0.5) * 5
-        const newConfidence = Math.max(5, Math.min(100, lastConfidence - degradation * 0.1 + noise))
+  // Apple UX: Throttled updates (16ms = 60fps) using requestAnimationFrame
+  const updateConfidence = useCallback((newValue) => {
+    const now = Date.now()
+    if (now - lastUpdateRef.current < 16) return // Skip if less than 16ms
+    lastUpdateRef.current = now
 
-        setCurrentConfidence(newConfidence)
-        setAttackSuccess(prev => Math.min(100, prev + (newConfidence < 50 ? 0.5 : 0)))
+    setCurrentConfidence(newValue)
+    setConfidenceHistory(prev => {
+      const newPoint = { time: prev.length, value: newValue }
+      return [...prev, newPoint].slice(-50)
+    })
+  }, [])
 
-        const newPoint = {
-          time: prev.length,
-          value: newConfidence,
+  // Use data service stream for real-time updates
+  useEffect(() => {
+    if (!isRunning) {
+      if (streamRef.current) streamRef.current.close()
+      return
+    }
+
+    streamRef.current = dataService.createAttackStream(
+      (message) => {
+        if (message.type === 'confidence') {
+          updateConfidence(message.data.value)
+          if (message.data.value < 50) {
+            setAttackSuccess(prev => Math.min(100, prev + 0.5))
+          }
         }
+      },
+      (error) => console.error('Stream error:', error)
+    )
 
-        const updated = [...prev, newPoint].slice(-50)
-        return updated
-      })
-    }, 100)
+    return () => {
+      if (streamRef.current) streamRef.current.close()
+    }
+  }, [isRunning, updateConfidence])
 
-    return () => clearInterval(interval)
-  }, [isRunning, epsilon])
-
-  // Neural Network D3 Visualization
+  // Neural Network Canvas Visualization (GPU-accelerated, replaces D3 for performance)
   useEffect(() => {
     if (!networkRef.current) return
 
@@ -61,75 +95,111 @@ const Dashboard = ({ onBack }) => {
     const width = container.clientWidth
     const height = 300
 
-    d3.select(container).selectAll('*').remove()
+    // Use Canvas for GPU acceleration instead of SVG (Apple: 60fps animations)
+    let canvas = container.querySelector('canvas')
+    if (!canvas) {
+      canvas = document.createElement('canvas')
+      canvas.width = width * window.devicePixelRatio
+      canvas.height = height * window.devicePixelRatio
+      canvas.style.width = `${width}px`
+      canvas.style.height = `${height}px`
+      container.appendChild(canvas)
+    }
 
-    const svg = d3.select(container)
-      .append('svg')
-      .attr('width', width)
-      .attr('height', height)
+    const ctx = canvas.getContext('2d')
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio)
 
     const layers = [4, 8, 8, 6, 3]
     const layerSpacing = width / (layers.length + 1)
 
-    // Draw connections
-    layers.forEach((nodeCount, layerIndex) => {
-      if (layerIndex === layers.length - 1) return
+    let animationId
+    const attackedNodes = new Set()
 
-      const nextLayerNodes = layers[layerIndex + 1]
-      const x1 = layerSpacing * (layerIndex + 1)
-      const x2 = layerSpacing * (layerIndex + 2)
-
-      for (let i = 0; i < nodeCount; i++) {
-        const y1 = (height / (nodeCount + 1)) * (i + 1)
-
-        for (let j = 0; j < nextLayerNodes; j++) {
-          const y2 = (height / (nextLayerNodes + 1)) * (j + 1)
-
-          const perturbation = isRunning ? (Math.random() - 0.5) * epsilon * 100 : 0
-
-          svg.append('line')
-            .attr('x1', x1)
-            .attr('y1', y1)
-            .attr('x2', x2)
-            .attr('y2', y2)
-            .attr('stroke', `rgba(99, 102, 241, ${0.1 + Math.random() * 0.2})`)
-            .attr('stroke-width', 0.5 + Math.random() * 0.5)
-            .attr('transform', `translate(${perturbation}, ${perturbation})`)
-        }
-      }
-    })
-
-    // Draw nodes
-    layers.forEach((nodeCount, layerIndex) => {
+    // Pre-calculate static positions (Apple: avoid layout thrashing)
+    const nodePositions = layers.map((nodeCount, layerIndex) => {
       const x = layerSpacing * (layerIndex + 1)
-
-      for (let i = 0; i < nodeCount; i++) {
-        const y = (height / (nodeCount + 1)) * (i + 1)
-        const isAttacked = isRunning && Math.random() > 0.7
-
-        const gradient = svg.append('defs')
-          .append('radialGradient')
-          .attr('id', `node-${layerIndex}-${i}`)
-
-        gradient.append('stop')
-          .attr('offset', '0%')
-          .attr('stop-color', isAttacked ? '#ef4444' : '#a855f7')
-
-        gradient.append('stop')
-          .attr('offset', '100%')
-          .attr('stop-color', isAttacked ? '#991b1b' : '#6366f1')
-
-        svg.append('circle')
-          .attr('cx', x)
-          .attr('cy', y)
-          .attr('r', 8)
-          .attr('fill', `url(#node-${layerIndex}-${i})`)
-          .attr('stroke', isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)')
-          .attr('stroke-width', isAttacked ? 2 : 1)
-          .style('filter', isAttacked ? 'drop-shadow(0 0 6px #ef4444)' : 'none')
-      }
+      return Array.from({ length: nodeCount }, (_, i) => ({
+        x,
+        y: (height / (nodeCount + 1)) * (i + 1),
+      }))
     })
 
+    const render = () => {
+      ctx.clearRect(0, 0, width, height)
+
+      // Update attacked nodes periodically (not every frame)
+      if (isRunning && Math.random() > 0.95) {
+        attackedNodes.clear()
+        nodePositions.forEach((layer, li) => {
+          layer.forEach((_, ni) => {
+            if (Math.random() > 0.7) attackedNodes.add(`${li}-${ni}`)
+          })
+        })
+      }
+
+      // Draw connections with GPU-friendly batching
+      ctx.beginPath()
+      layers.forEach((nodeCount, layerIndex) => {
+        if (layerIndex === layers.length - 1) return
+        const nextLayerNodes = layers[layerIndex + 1]
+
+        for (let i = 0; i < nodeCount; i++) {
+          const { x: x1, y: y1 } = nodePositions[layerIndex][i]
+          for (let j = 0; j < nextLayerNodes; j++) {
+            const { x: x2, y: y2 } = nodePositions[layerIndex + 1][j]
+            ctx.moveTo(x1, y1)
+            ctx.lineTo(x2, y2)
+          }
+        }
+      })
+      ctx.strokeStyle = 'rgba(99, 102, 241, 0.15)'
+      ctx.lineWidth = 0.5
+      ctx.stroke()
+
+      // Draw nodes
+      nodePositions.forEach((layer, layerIndex) => {
+        layer.forEach((pos, nodeIndex) => {
+          const isAttacked = attackedNodes.has(`${layerIndex}-${nodeIndex}`)
+
+          ctx.beginPath()
+          ctx.arc(pos.x, pos.y, 8, 0, Math.PI * 2)
+
+          // Gradient fill
+          const gradient = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, 8)
+          if (isAttacked) {
+            gradient.addColorStop(0, '#ef4444')
+            gradient.addColorStop(1, '#991b1b')
+          } else {
+            gradient.addColorStop(0, '#a855f7')
+            gradient.addColorStop(1, '#6366f1')
+          }
+          ctx.fillStyle = gradient
+          ctx.fill()
+
+          ctx.strokeStyle = isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)'
+          ctx.lineWidth = isAttacked ? 2 : 1
+          ctx.stroke()
+
+          // Glow effect for attacked nodes (using shadow)
+          if (isAttacked) {
+            ctx.shadowColor = '#ef4444'
+            ctx.shadowBlur = 10
+            ctx.fill()
+            ctx.shadowBlur = 0
+          }
+        })
+      })
+
+      if (isRunning && !prefersReducedMotion) {
+        animationId = requestAnimationFrame(render)
+      }
+    }
+
+    render()
+
+    return () => {
+      if (animationId) cancelAnimationFrame(animationId)
+    }
   }, [isRunning, epsilon])
 
   return (
