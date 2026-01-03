@@ -51,22 +51,26 @@ const Dashboard = ({ onBack }) => {
   console.log('[Dashboard] Component rendering')
 
   const [isLoading, setIsLoading] = useState(true)
+  const [modelInfo, setModelInfo] = useState(null)
   const [error, setError] = useState(null)
 
   const [activeAttack, setActiveAttack] = useState('fgsm')
   const [epsilon, setEpsilon] = useState(0.03)
-  const [isRunning, setIsRunning] = useState(true)
+  const [isRunning, setIsRunning] = useState(false)
   const [currentConfidence, setCurrentConfidence] = useState(97.2)
   const [confidenceHistory, setConfidenceHistory] = useState([])
   const [attackSuccess, setAttackSuccess] = useState(0)
+  const [predictions, setPredictions] = useState([])
   const [defenses, setDefenses] = useState([
     { name: 'Adversarial Training', effectiveness: 78, enabled: false },
     { name: 'Input Preprocessing', effectiveness: 45, enabled: true },
     { name: 'Defensive Distillation', effectiveness: 62, enabled: false },
     { name: 'Feature Squeezing', effectiveness: 55, enabled: true },
   ])
+  const [attackLog, setAttackLog] = useState([])
 
   const intervalRef = useRef(null)
+  const streamRef = useRef(null)
 
   const attacks = useMemo(() => [
     { id: 'fgsm', name: 'FGSM', description: 'Fast Gradient Sign Method', color: '#ef4444' },
@@ -75,43 +79,115 @@ const Dashboard = ({ onBack }) => {
     { id: 'deepfool', name: 'DeepFool', description: 'Minimal Perturbation', color: '#06b6d4' },
   ], [])
 
-  useEffect(() => {
-    console.log('[Dashboard] Mounting...')
-    const timer = setTimeout(() => {
-      console.log('[Dashboard] Loading complete')
-      setIsLoading(false)
-    }, 1000)
-    return () => {
-      console.log('[Dashboard] Unmounting...')
-      clearTimeout(timer)
-    }
+  const addToLog = useCallback((message, type = 'info') => {
+    setAttackLog(prev => [
+      { message, type, time: Date.now() },
+      ...prev
+    ].slice(0, 10))
   }, [])
 
-  useEffect(() => {
-    if (!isRunning || isLoading) {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
-      return
-    }
+  const runAttack = useCallback(async () => {
+    try {
+      console.log(`[Dashboard] Running ${activeAttack} attack with epsilon=${epsilon}`)
+      addToLog(`${activeAttack.toUpperCase()} attack started (ε=${epsilon.toFixed(3)})`, 'attack')
 
-    intervalRef.current = setInterval(() => {
-      const degradation = epsilon * 800
-      const noise = (Math.random() - 0.5) * 10
-      const defenseBoost = defenses.filter(d => d.enabled).reduce((acc, d) => acc + d.effectiveness * 0.1, 0)
-      const newConfidence = Math.max(5, Math.min(100, 97.2 - degradation + noise + defenseBoost))
-      
+      const result = await dataService.executeAttack(activeAttack, epsilon, null)
+
+      console.log('[Dashboard] Attack result:', result)
+
+      const newConfidence = result.predictions?.[0]?.confidence || 97.2
       setCurrentConfidence(newConfidence)
+
       setConfidenceHistory(prev => {
         const newPoint = { time: prev.length, value: newConfidence }
         return [...prev, newPoint].slice(-50)
       })
-      
-      if (newConfidence < 50) {
-        setAttackSuccess(prev => Math.min(100, prev + 0.5))
+
+      if (result.predictions) {
+        setPredictions(result.predictions)
       }
-    }, 100)
+
+      if (newConfidence < 50) {
+        setAttackSuccess(prev => Math.min(100, prev + 5))
+        addToLog(`Confidence dropped to ${newConfidence.toFixed(1)}%`, 'danger')
+      } else {
+        addToLog(`Confidence: ${newConfidence.toFixed(1)}%`, 'info')
+      }
+
+      if (result.success) {
+        addToLog('Attack SUCCESSFUL - misclassification achieved!', 'danger')
+      } else {
+        addToLog('Attack failed - model maintained prediction', 'success')
+      }
+
+    } catch (err) {
+      console.error('[Dashboard] Attack error:', err)
+      addToLog(`Error: ${err.message}`, 'danger')
+    }
+  }, [activeAttack, epsilon, addToLog])
+
+  const toggleDefense = useCallback((index) => {
+    setDefenses(prev => {
+      const newDefenses = [...prev]
+      newDefenses[index] = { ...newDefenses[index], enabled: !newDefenses[index].enabled }
+      return newDefenses
+    })
+    addToLog(`${defenses[index].name} ${defenses[index].enabled ? 'disabled' : 'enabled'}`, 'info')
+  }, [defenses, addToLog])
+
+  useEffect(() => {
+    console.log('[Dashboard] Mounting...')
+    
+    const initDashboard = async () => {
+      try {
+        addToLog('Initializing TensorFlow.js model...', 'info')
+
+        const defenseData = await dataService.fetchDefenseMetrics()
+        if (defenseData.defenses) {
+          setDefenses(defenseData.defenses)
+        }
+
+        const initialPrediction = await dataService.fetchPrediction(null, null)
+        if (initialPrediction.predictions) {
+          setPredictions(initialPrediction.predictions)
+          setCurrentConfidence(initialPrediction.predictions[0]?.confidence || 97.2)
+        }
+
+        addToLog('Model loaded. Ready to simulate attacks.', 'success')
+        setIsLoading(false)
+        console.log('[Dashboard] Initialization complete')
+      } catch (err) {
+        console.error('[Dashboard] Init error:', err)
+        addToLog(`Init error: ${err.message}`, 'danger')
+        setIsLoading(false)
+      }
+    }
+
+    initDashboard()
+
+    return () => {
+      console.log('[Dashboard] Unmounting...')
+      if (intervalRef.current) clearInterval(intervalRef.current)
+      if (streamRef.current) streamRef.current.close()
+    }
+  }, [addToLog])
+
+  useEffect(() => {
+    if (isRunning) {
+      console.log('[Dashboard] Starting attack simulation')
+      addToLog('Attack simulation started', 'info')
+
+      intervalRef.current = setInterval(async () => {
+        await runAttack()
+      }, 2000)
+    } else {
+      console.log('[Dashboard] Stopping attack simulation')
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+        intervalRef.current = null
+      }
+      addToLog('Attack simulation paused', 'info')
+    }
 
     return () => {
       if (intervalRef.current) {
@@ -119,13 +195,7 @@ const Dashboard = ({ onBack }) => {
         intervalRef.current = null
       }
     }
-  }, [isRunning, epsilon, defenses, isLoading])
-
-  const mockPredictions = useMemo(() => [
-    { label: 'Panda', confidence: currentConfidence, original: true },
-    { label: 'Gibbon', confidence: Math.min(90, 100 - currentConfidence + Math.random() * 10), original: false },
-    { label: 'Macaque', confidence: Math.random() * 15, original: false },
-  ].sort((a, b) => b.confidence - a.confidence), [currentConfidence])
+  }, [isRunning, runAttack, addToLog])
 
   if (isLoading) {
     console.log('[Dashboard] Showing loading state')
@@ -133,7 +203,8 @@ const Dashboard = ({ onBack }) => {
       <div className="min-h-screen bg-black neural-grid flex items-center justify-center">
         <div className="text-center">
           <div className="w-16 h-16 rounded-full border-2 border-neural-primary/30 border-t-neural-primary animate-spin mx-auto mb-4" />
-          <p className="text-white/50">Loading visualization...</p>
+          <p className="text-white/50">Loading TensorFlow.js model...</p>
+          <p className="text-white/30 text-sm mt-2">Downloading MobileNet (~10MB)</p>
         </div>
       </div>
     )
@@ -165,7 +236,7 @@ const Dashboard = ({ onBack }) => {
               <h1 className="text-2xl font-bold">
                 <span className="gradient-text">AdversarialX</span> Dashboard
               </h1>
-              <p className="text-sm text-white/50">Real-time attack simulation and analysis</p>
+              <p className="text-sm text-white/50">TensorFlow.js Real-time Attack Simulation</p>
             </div>
           </div>
 
@@ -259,20 +330,23 @@ const Dashboard = ({ onBack }) => {
                       <div className="flex items-center gap-2 mt-1">
                         <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-neural-success rounded-full"
+                            className="h-full bg-neural-success rounded-full transition-all duration-300"
                             style={{ width: `${defense.effectiveness}%` }}
                           />
                         </div>
                         <span className="text-xs text-white/40">{defense.effectiveness}%</span>
                       </div>
                     </div>
-                    <div className={`w-10 h-6 rounded-full p-1 cursor-pointer transition-colors ${
-                      defense.enabled ? 'bg-neural-success' : 'bg-white/20'
-                    }`}>
+                    <button
+                      onClick={() => toggleDefense(index)}
+                      className={`w-10 h-6 rounded-full p-1 cursor-pointer transition-colors ${
+                        defense.enabled ? 'bg-neural-success' : 'bg-white/20'
+                      }`}
+                    >
                       <div className={`w-4 h-4 rounded-full bg-white transition-transform ${
                         defense.enabled ? 'translate-x-4' : ''
                       }`} />
-                    </div>
+                    </button>
                   </div>
                 ))}
               </div>
@@ -300,55 +374,59 @@ const Dashboard = ({ onBack }) => {
                       <stop offset="100%" stopColor="#991b1b" />
                     </radialGradient>
                   </defs>
-                  {[[4, 8, 8, 6, 3]].map((layers, layerIndex) => {
+                  {(() => {
+                    const layers = [4, 8, 8, 6, 3]
                     const layerSpacing = 600 / (layers.length + 1)
-                    return layers.map((nodeCount, li) => {
-                      const x = layerSpacing * (li + 1)
-                      return Array.from({ length: nodeCount }).map((_, ni) => {
-                        const y = (300 / (nodeCount + 1)) * (ni + 1)
-                        const isAttacked = isRunning && Math.random() > 0.7
-                        return (
-                          <g key={`${li}-${ni}`}>
-                            {Array.from({ length: nodeCount }).map((_, pni) => {
-                              const px = layerSpacing * (li + 1)
-                              const py = (300 / (nodeCount + 1)) * (pni + 1)
-                              if (li === layers.length - 1) return null
-                              return (
+                    const nodePositions = layers.map((nodeCount, layerIndex) => {
+                      const x = layerSpacing * (layerIndex + 1)
+                      return Array.from({ length: nodeCount }, (_, i) => ({
+                        x,
+                        y: (300 / (nodeCount + 1)) * (i + 1),
+                        isAttacked: isRunning && Math.random() > 0.6
+                      }))
+                    })
+                    return (
+                      <>
+                        {nodePositions.map((layer, li) =>
+                          layer.map((node, ni) => (
+                            <g key={`${li}-${ni}`}>
+                              {li < layers.length - 1 && nodePositions[li + 1].map((nextNode, pni) => (
                                 <line
                                   key={`conn-${li}-${ni}-${pni}`}
-                                  x1={x}
-                                  y1={y}
-                                  x2={px}
-                                  y2={py}
-                                  stroke="rgba(99, 102, 241, 0.15)"
-                                  strokeWidth="0.5"
+                                  x1={node.x}
+                                  y1={node.y}
+                                  x2={nextNode.x}
+                                  y2={nextNode.y}
+                                  stroke={node.isAttacked || nextNode.isAttacked ? 'rgba(239, 68, 68, 0.3)' : 'rgba(99, 102, 241, 0.15)'}
+                                  strokeWidth={node.isAttacked || nextNode.isAttacked ? '1' : '0.5'}
                                 />
-                              )
-                            })}
-                            <circle
-                              cx={x}
-                              cy={y}
-                              r={isAttacked ? 10 : 8}
-                              fill={isAttacked ? 'url(#attackedGradient)' : 'url(#nodeGradient)'}
-                              stroke={isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)'}
-                              strokeWidth={isAttacked ? 2 : 1}
-                            />
-                            {isAttacked && (
+                              ))}
                               <circle
-                                cx={x}
-                                cy={y}
-                                r={15}
-                                fill="none"
-                                stroke="#ef4444"
-                                strokeWidth="1"
-                                opacity="0.5"
+                                cx={node.x}
+                                cy={node.y}
+                                r={node.isAttacked ? 10 : 8}
+                                fill={node.isAttacked ? 'url(#attackedGradient)' : 'url(#nodeGradient)'}
+                                stroke={node.isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)'}
+                                strokeWidth={node.isAttacked ? 2 : 1}
                               />
-                            )}
-                          </g>
-                        )
-                      })
-                    })
-                  })}
+                              {node.isAttacked && (
+                                <circle
+                                  cx={node.x}
+                                  cy={node.y}
+                                  r={15}
+                                  fill="none"
+                                  stroke="#ef4444"
+                                  strokeWidth="1"
+                                  opacity="0.5"
+                                  className="animate-ping"
+                                />
+                              )}
+                            </g>
+                          ))
+                        )}
+                      </>
+                    )
+                  })()}
                 </svg>
               </div>
               <div className="flex justify-around mt-4 text-xs text-white/40">
@@ -418,21 +496,25 @@ const Dashboard = ({ onBack }) => {
             <div className="glass-panel p-6">
               <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Classification Output</h3>
               <div className="space-y-3">
-                {mockPredictions.map((item, index) => (
+                {(predictions.length > 0 ? predictions : [
+                  { label: 'Loading...', confidence: 0, original: true },
+                  { label: '-', confidence: 0, original: false },
+                  { label: '-', confidence: 0, original: false }
+                ]).map((item, index) => (
                   <div key={item.label} className={`p-3 rounded-xl ${index === 0 ? 'bg-white/10 border border-white/20' : 'bg-white/5'}`}>
                     <div className="flex justify-between mb-2">
                       <span className={`text-sm ${index === 0 ? 'text-white font-medium' : 'text-white/60'}`}>
                         {item.label}
-                        {item.original && index === 0 && <span className="ml-2 text-xs text-neural-success">✓</span>}
+                        {item.original && index === 0 && <span className="ml-2 text-xs text-neural-success">✓ Original</span>}
                       </span>
                       <span className={`text-sm font-mono ${index === 0 ? 'text-neural-primary' : 'text-white/40'}`}>
-                        {item.confidence.toFixed(1)}%
+                        {item.confidence > 0 ? `${item.confidence.toFixed(1)}%` : '-'}
                       </span>
                     </div>
                     <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
                       <motion.div
                         className={`h-full rounded-full ${index === 0 ? 'bg-neural-primary' : 'bg-white/30'}`}
-                        animate={{ width: `${item.confidence}%` }}
+                        animate={{ width: `${item.confidence || 0}%` }}
                         transition={{ duration: 0.3 }}
                       />
                     </div>
@@ -443,23 +525,26 @@ const Dashboard = ({ onBack }) => {
 
             <div className="glass-panel p-6">
               <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Attack Log</h3>
-              <div className="space-y-2 max-h-[200px] overflow-y-auto font-mono text-xs">
-                {isRunning && (
-                  <>
-                    <div className="p-2 rounded bg-neural-danger/10 text-neural-danger">
-                      [ATTACK] {activeAttack.toUpperCase()} perturbation applied (ε={epsilon.toFixed(3)})
+              <div className="space-y-2 max-h-[150px] overflow-y-auto font-mono text-xs">
+                {attackLog.length === 0 ? (
+                  <div className="p-2 rounded bg-white/5 text-white/40">
+                    [SYS] Ready for attack simulation
+                  </div>
+                ) : (
+                  attackLog.map((log, i) => (
+                    <div
+                      key={i}
+                      className={`p-2 rounded ${
+                        log.type === 'danger' ? 'bg-neural-danger/10 text-neural-danger' :
+                        log.type === 'success' ? 'bg-neural-success/10 text-neural-success' :
+                        log.type === 'attack' ? 'bg-neural-warning/10 text-neural-warning' :
+                        'bg-white/5 text-white/60'
+                      }`}
+                    >
+                      [{log.type.toUpperCase()}] {log.message}
                     </div>
-                    <div className="p-2 rounded bg-white/5 text-white/60">
-                      [INFO] Confidence dropped to {currentConfidence.toFixed(1)}%
-                    </div>
-                    <div className="p-2 rounded bg-neural-warning/10 text-neural-warning">
-                      [WARN] Classification boundary approached
-                    </div>
-                  </>
+                  ))
                 )}
-                <div className="p-2 rounded bg-white/5 text-white/40">
-                  [SYS] Attack simulation initialized
-                </div>
               </div>
             </div>
           </div>
