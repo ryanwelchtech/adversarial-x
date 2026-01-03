@@ -1,7 +1,6 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, Component } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, Component } from 'react'
 import { motion } from 'framer-motion'
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis } from 'recharts'
-import dataService from '../data/dataService'
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -24,21 +23,9 @@ class ErrorBoundary extends Component {
       return (
         <div className="min-h-screen bg-black flex items-center justify-center p-6">
           <div className="glass-panel p-8 max-w-md text-center">
-            <div className="w-16 h-16 rounded-full bg-neural-danger/20 flex items-center justify-center mx-auto mb-4">
-              <svg className="w-8 h-8 text-neural-danger" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="10"/>
-                <line x1="12" y1="8" x2="12" y2="12"/>
-                <line x1="12" y1="16" x2="12.01" y2="16"/>
-              </svg>
-            </div>
             <h2 className="text-xl font-semibold text-white mb-2">Visualization Error</h2>
-            <p className="text-white/50 mb-4">{this.state.error?.message || 'An unexpected error occurred'}</p>
-            <button
-              onClick={() => window.location.reload()}
-              className="glass-button"
-            >
-              Reload Dashboard
-            </button>
+            <p className="text-white/50 mb-4">{this.state.error?.message || 'Error'}</p>
+            <button onClick={() => window.location.reload()} className="glass-button">Reload</button>
           </div>
         </div>
       )
@@ -48,11 +35,11 @@ class ErrorBoundary extends Component {
 }
 
 const Dashboard = ({ onBack }) => {
-  console.log('[Dashboard] Component rendering')
+  console.log('[Dashboard] Rendering...')
 
   const [isLoading, setIsLoading] = useState(true)
-  const [modelInfo, setModelInfo] = useState(null)
-  const [error, setError] = useState(null)
+  const [modelLoaded, setModelLoaded] = useState(false)
+  const [seed, setSeed] = useState(42)
 
   const [activeAttack, setActiveAttack] = useState('fgsm')
   const [epsilon, setEpsilon] = useState(0.03)
@@ -60,6 +47,9 @@ const Dashboard = ({ onBack }) => {
   const [currentConfidence, setCurrentConfidence] = useState(97.2)
   const [confidenceHistory, setConfidenceHistory] = useState([])
   const [attackSuccess, setAttackSuccess] = useState(0)
+  const [attackCount, setAttackCount] = useState(0)
+  const [successCount, setSuccessCount] = useState(0)
+  const [originalPrediction, setOriginalPrediction] = useState({ label: 'tench', confidence: 97.2 })
   const [predictions, setPredictions] = useState([])
   const [attackedNodes, setAttackedNodes] = useState(new Set())
   const [defenses, setDefenses] = useState([
@@ -71,7 +61,6 @@ const Dashboard = ({ onBack }) => {
   const [attackLog, setAttackLog] = useState([])
 
   const intervalRef = useRef(null)
-  const streamRef = useRef(null)
 
   const attacks = useMemo(() => [
     { id: 'fgsm', name: 'FGSM', description: 'Fast Gradient Sign Method', color: '#ef4444' },
@@ -81,27 +70,35 @@ const Dashboard = ({ onBack }) => {
   ], [])
 
   const addToLog = useCallback((message, type = 'info') => {
-    setAttackLog(prev => [
-      { message, type, time: Date.now() },
-      ...prev
-    ].slice(0, 10))
+    setAttackLog(prev => [{ message, type, time: Date.now() }, ...prev].slice(0, 15))
   }, [])
 
   const runAttack = useCallback(async () => {
-    try {
-      console.log(`[Dashboard] Running ${activeAttack} attack with epsilon=${epsilon}`)
-      addToLog(`${activeAttack.toUpperCase()} attack started (ε=${epsilon.toFixed(3)})`, 'attack')
+    const newSeed = seed + 1
+    setSeed(newSeed)
 
-      const result = await dataService.executeAttack(activeAttack, epsilon, null)
+    try {
+      console.log(`[Dashboard] Running ${activeAttack} attack (ε=${epsilon}, seed=${newSeed})`)
+      addToLog(`${activeAttack.toUpperCase()} attack with ε=${epsilon.toFixed(3)}`, 'attack')
+
+      const tfService = await import('../services/tfService')
+      const result = await tfService.executeAttack(activeAttack, epsilon, null, newSeed)
 
       console.log('[Dashboard] Attack result:', result)
 
-      const newConfidence = result.predictions?.[0]?.confidence || 97.2
+      setAttackCount(prev => prev + 1)
+
+      const newConfidence = result.adversarialConfidence
       setCurrentConfidence(newConfidence)
 
       setConfidenceHistory(prev => {
         const newPoint = { time: prev.length, value: newConfidence }
-        return [...prev, newPoint].slice(-50)
+        return [...prev, newPoint].slice(-60)
+      })
+
+      setOriginalPrediction({
+        label: result.originalPrediction,
+        confidence: result.originalConfidence
       })
 
       if (result.predictions) {
@@ -109,24 +106,31 @@ const Dashboard = ({ onBack }) => {
       }
 
       if (result.success) {
-        setAttackSuccess(prev => Math.min(100, prev + 2))
-        addToLog(`SUCCESS: ${result.predictions?.[0]?.label || 'unknown'} at ${newConfidence.toFixed(1)}%`, 'danger')
+        setSuccessCount(prev => prev + 1)
+        setAttackSuccess(prev => Math.min(100, Math.round((prev + 1) / (attackCount + 1) * 100)))
+        addToLog(`MISCLASSIFIED: ${result.originalPrediction} → ${result.adversarialPrediction}`, 'danger')
       } else {
-        addToLog(`Failed: ${newConfidence.toFixed(1)}% confidence`, 'info')
+        const successRate = result.success ? 0 : Math.round((1 - newConfidence / 100) * 100)
+        addToLog(`${result.adversarialPrediction}: ${newConfidence.toFixed(1)}% (robust)`, 'info')
       }
 
-      if (newConfidence < 50) {
+      const effectiveness = defenses.filter(d => d.enabled).reduce((acc, d) => acc + d.effectiveness, 0) / 20
+      const threshold = 50 + effectiveness * 20
+
+      if (newConfidence < threshold || (newConfidence < 70 && epsilon > 0.05)) {
         const newAttacked = new Set()
         const layers = [4, 8, 8, 6, 3]
-        layers.forEach((_, li) => {
-          Array.from({ length: layers[li] }).forEach((_, ni) => {
-            if (Math.random() > 0.3) newAttacked.add(`${li}-${ni}`)
-          })
-        })
+        const numAttacked = Math.floor((1 - newConfidence / 100) * 25 + 5)
+        for (let i = 0; i < numAttacked; i++) {
+          const li = Math.floor(Math.random() * 5)
+          const nodeCount = li === 0 ? 4 : li === 1 || li === 2 ? 8 : li === 3 ? 6 : 3
+          const ni = Math.floor(Math.random() * nodeCount)
+          newAttacked.add(`${li}-${ni}`)
+        }
         setAttackedNodes(newAttacked)
-      } else if (newConfidence < 70) {
+      } else if (newConfidence < 80 || epsilon > 0.03) {
         const newAttacked = new Set()
-        const numAttacked = Math.floor((1 - newConfidence / 100) * 20)
+        const numAttacked = Math.floor((1 - newConfidence / 100) * 15)
         for (let i = 0; i < numAttacked; i++) {
           const li = Math.floor(Math.random() * 5)
           const nodeCount = li === 0 ? 4 : li === 1 || li === 2 ? 8 : li === 3 ? 6 : 3
@@ -142,7 +146,7 @@ const Dashboard = ({ onBack }) => {
       console.error('[Dashboard] Attack error:', err)
       addToLog(`Error: ${err.message}`, 'danger')
     }
-  }, [activeAttack, epsilon, addToLog])
+  }, [activeAttack, epsilon, seed, defenses, attackCount, addToLog])
 
   const toggleDefense = useCallback((index) => {
     setDefenses(prev => {
@@ -150,28 +154,26 @@ const Dashboard = ({ onBack }) => {
       newDefenses[index] = { ...newDefenses[index], enabled: !newDefenses[index].enabled }
       return newDefenses
     })
-    addToLog(`${defenses[index].name} ${defenses[index].enabled ? 'disabled' : 'enabled'}`, 'info')
-  }, [defenses, addToLog])
+  }, [])
 
   useEffect(() => {
-    console.log('[Dashboard] Mounting...')
-    
-    const initDashboard = async () => {
+    console.log('[Dashboard] Initializing TensorFlow.js...')
+    addToLog('Loading MobileNet V2 model...', 'info')
+
+    const init = async () => {
       try {
-        addToLog('Initializing TensorFlow.js model...', 'info')
+        const tfService = await import('../services/tfService')
+        await tfService.loadModel()
+        setModelLoaded(true)
+        addToLog('Model loaded. Ready.', 'success')
 
-        const defenseData = await dataService.fetchDefenseMetrics()
-        if (defenseData.defenses) {
-          setDefenses(defenseData.defenses)
-        }
-
-        const initialPrediction = await dataService.fetchPrediction(null, null)
-        if (initialPrediction.predictions) {
-          setPredictions(initialPrediction.predictions)
-          setCurrentConfidence(initialPrediction.predictions[0]?.confidence || 97.2)
-        }
-
-        addToLog('Model loaded. Ready to simulate attacks.', 'success')
+        const initialResult = await tfService.executeAttack('fgsm', 0, null, 42)
+        setOriginalPrediction({
+          label: initialResult.originalPrediction,
+          confidence: initialResult.originalConfidence
+        })
+        setPredictions(initialResult.predictions)
+        setCurrentConfidence(initialResult.adversarialConfidence)
         setIsLoading(false)
         console.log('[Dashboard] Initialization complete')
       } catch (err) {
@@ -181,30 +183,22 @@ const Dashboard = ({ onBack }) => {
       }
     }
 
-    initDashboard()
+    init()
 
     return () => {
-      console.log('[Dashboard] Unmounting...')
       if (intervalRef.current) clearInterval(intervalRef.current)
-      if (streamRef.current) streamRef.current.close()
     }
   }, [addToLog])
 
   useEffect(() => {
     if (isRunning) {
-      console.log('[Dashboard] Starting attack simulation')
-      addToLog('Attack simulation started', 'info')
-
-      intervalRef.current = setInterval(async () => {
-        await runAttack()
-      }, 2000)
+      console.log('[Dashboard] Starting attack loop')
+      intervalRef.current = setInterval(runAttack, 2000)
     } else {
-      console.log('[Dashboard] Stopping attack simulation')
       if (intervalRef.current) {
         clearInterval(intervalRef.current)
         intervalRef.current = null
       }
-      addToLog('Attack simulation paused', 'info')
     }
 
     return () => {
@@ -213,36 +207,33 @@ const Dashboard = ({ onBack }) => {
         intervalRef.current = null
       }
     }
-  }, [isRunning, runAttack, addToLog])
+  }, [isRunning, runAttack])
 
   if (isLoading) {
-    console.log('[Dashboard] Showing loading state')
     return (
       <div className="min-h-screen bg-black neural-grid flex items-center justify-center">
         <div className="text-center">
           <div className="w-16 h-16 rounded-full border-2 border-neural-primary/30 border-t-neural-primary animate-spin mx-auto mb-4" />
-          <p className="text-white/50">Loading TensorFlow.js model...</p>
-          <p className="text-white/30 text-sm mt-2">Downloading MobileNet (~10MB)</p>
+          <p className="text-white/50">Loading MobileNet V2...</p>
+          <p className="text-white/30 text-sm mt-2">~10MB download</p>
         </div>
       </div>
     )
   }
 
-  console.log('[Dashboard] Rendering main content')
   return (
     <ErrorBoundary>
       <motion.div
         className="min-h-screen bg-black neural-grid p-6"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
         style={{ minHeight: '100vh' }}
       >
         <header className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
             <motion.button
               onClick={onBack}
-              className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors"
+              className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10"
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
             >
@@ -252,9 +243,9 @@ const Dashboard = ({ onBack }) => {
             </motion.button>
             <div>
               <h1 className="text-2xl font-bold">
-                <span className="gradient-text">AdversarialX</span> Dashboard
+                <span className="gradient-text">AdversarialX</span>
               </h1>
-              <p className="text-sm text-white/50">TensorFlow.js Real-time Attack Simulation</p>
+              <p className="text-sm text-white/50">TensorFlow.js Attack Simulation</p>
             </div>
           </div>
 
@@ -268,7 +259,7 @@ const Dashboard = ({ onBack }) => {
               {isRunning ? (
                 <>
                   <span className="w-2 h-2 rounded-full bg-neural-danger animate-pulse"></span>
-                  Stop Attack
+                  Stop
                 </>
               ) : (
                 <>
@@ -302,10 +293,7 @@ const Dashboard = ({ onBack }) => {
                         <span className="font-semibold text-white">{attack.name}</span>
                         <p className="text-xs text-white/50 mt-1">{attack.description}</p>
                       </div>
-                      <div
-                        className="w-3 h-3 rounded-full"
-                        style={{ backgroundColor: attack.color }}
-                      />
+                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: attack.color }} />
                     </div>
                   </motion.button>
                 ))}
@@ -313,10 +301,10 @@ const Dashboard = ({ onBack }) => {
             </div>
 
             <div className="glass-panel p-6">
-              <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Perturbation Strength</h3>
+              <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Perturbation (ε)</h3>
               <div className="space-y-4">
                 <div className="flex justify-between">
-                  <span className="text-sm text-white/50">Epsilon (ε)</span>
+                  <span className="text-sm text-white/50">Epsilon</span>
                   <span className="text-lg font-mono text-neural-primary">{epsilon.toFixed(3)}</span>
                 </div>
                 <input
@@ -348,7 +336,7 @@ const Dashboard = ({ onBack }) => {
                       <div className="flex items-center gap-2 mt-1">
                         <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-neural-success rounded-full transition-all duration-300"
+                            className="h-full bg-neural-success rounded-full transition-all"
                             style={{ width: `${defense.effectiveness}%` }}
                           />
                         </div>
@@ -357,13 +345,9 @@ const Dashboard = ({ onBack }) => {
                     </div>
                     <button
                       onClick={() => toggleDefense(index)}
-                      className={`w-10 h-6 rounded-full p-1 cursor-pointer transition-colors ${
-                        defense.enabled ? 'bg-neural-success' : 'bg-white/20'
-                      }`}
+                      className={`w-10 h-6 rounded-full p-1 transition-colors ${defense.enabled ? 'bg-neural-success' : 'bg-white/20'}`}
                     >
-                      <div className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                        defense.enabled ? 'translate-x-4' : ''
-                      }`} />
+                      <div className={`w-4 h-4 rounded-full bg-white transition-transform ${defense.enabled ? 'translate-x-4' : ''}`} />
                     </button>
                   </div>
                 ))}
@@ -376,7 +360,7 @@ const Dashboard = ({ onBack }) => {
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider">Neural Network State</h3>
                 <div className="flex items-center gap-2">
-                  <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-neural-danger animate-pulse' : 'bg-neural-success'}`}></span>
+                  <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-neural-danger animate-pulse' : 'bg-neural-success'}`} />
                   <span className="text-xs text-white/50">{isRunning ? 'Under Attack' : 'Stable'}</span>
                 </div>
               </div>
@@ -407,7 +391,7 @@ const Dashboard = ({ onBack }) => {
                       return Array.from({ length: nodeCount }, (_, i) => ({
                         x,
                         y: (300 / (nodeCount + 1)) * (i + 1),
-                        isAttacked: attackedNodes.has(`${layerIndex}-${i}`) || (isRunning && Math.random() > 0.9)
+                        isAttacked: attackedNodes.has(`${layerIndex}-${i}`)
                       }))
                     })
                     return (
@@ -418,34 +402,25 @@ const Dashboard = ({ onBack }) => {
                               {li < layers.length - 1 && nodePositions[li + 1].map((nextNode, pni) => (
                                 <line
                                   key={`conn-${li}-${ni}-${pni}`}
-                                  x1={node.x}
-                                  y1={node.y}
-                                  x2={nextNode.x}
-                                  y2={nextNode.y}
-                                  stroke={node.isAttacked || nextNode.isAttacked ? 'rgba(239, 68, 68, 0.4)' : 'rgba(99, 102, 241, 0.15)'}
-                                  strokeWidth={node.isAttacked || nextNode.isAttacked ? '1.5' : '0.5'}
+                                  x1={node.x} y1={node.y}
+                                  x2={nextNode.x} y2={nextNode.y}
+                                  stroke={node.isAttacked || nextNode.isAttacked ? 'rgba(239, 68, 68, 0.5)' : 'rgba(99, 102, 241, 0.15)'}
+                                  strokeWidth={node.isAttacked || nextNode.isAttacked ? 1.5 : 0.5}
                                 />
                               ))}
                               <circle
-                                cx={node.x}
-                                cy={node.y}
+                                cx={node.x} cy={node.y}
                                 r={node.isAttacked ? 12 : 8}
                                 fill={node.isAttacked ? 'url(#attackedGradient)' : 'url(#nodeGradient)'}
                                 stroke={node.isAttacked ? '#ef4444' : 'rgba(255,255,255,0.2)'}
                                 strokeWidth={node.isAttacked ? 2 : 1}
                                 filter={node.isAttacked ? 'url(#glow)' : ''}
-                                className={node.isAttacked ? 'animate-pulse' : ''}
                               />
                               {node.isAttacked && (
                                 <circle
-                                  cx={node.x}
-                                  cy={node.y}
-                                  r={20}
-                                  fill="none"
-                                  stroke="#ef4444"
-                                  strokeWidth="1.5"
-                                  opacity="0.6"
-                                  className="animate-ping"
+                                  cx={node.x} cy={node.y} r={20}
+                                  fill="none" stroke="#ef4444" strokeWidth="1.5"
+                                  opacity="0.6" className="animate-ping"
                                 />
                               )}
                             </g>
@@ -457,16 +432,14 @@ const Dashboard = ({ onBack }) => {
                 </svg>
               </div>
               <div className="flex justify-around mt-4 text-xs text-white/40">
-                <span>Input Layer</span>
-                <span>Hidden Layers</span>
-                <span>Output Layer</span>
+                <span>Input</span><span>Hidden 1</span><span>Hidden 2</span><span>Hidden 3</span><span>Output</span>
               </div>
             </div>
 
             <div className="glass-panel p-6">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider">Model Confidence Over Time</h3>
-                <span className={`text-2xl font-bold ${currentConfidence < 50 ? 'text-neural-danger' : 'text-neural-success'}`}>
+                <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider">Confidence Over Time</h3>
+                <span className={`text-2xl font-bold ${currentConfidence < 50 ? 'text-neural-danger' : currentConfidence < 70 ? 'text-neural-warning' : 'text-neural-success'}`}>
                   {currentConfidence.toFixed(1)}%
                 </span>
               </div>
@@ -474,20 +447,14 @@ const Dashboard = ({ onBack }) => {
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={confidenceHistory}>
                     <defs>
-                      <linearGradient id="confidenceGradient" x1="0" y1="0" x2="0" y2="1">
+                      <linearGradient id="confGrad" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#6366f1" stopOpacity={0.3}/>
                         <stop offset="100%" stopColor="#6366f1" stopOpacity={0}/>
                       </linearGradient>
                     </defs>
                     <XAxis dataKey="time" hide />
                     <YAxis domain={[0, 100]} hide />
-                    <Area
-                      type="monotone"
-                      dataKey="value"
-                      stroke="#6366f1"
-                      strokeWidth={2}
-                      fill="url(#confidenceGradient)"
-                    />
+                    <Area type="monotone" dataKey="value" stroke="#6366f1" strokeWidth={2} fill="url(#confGrad)" />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
@@ -499,47 +466,48 @@ const Dashboard = ({ onBack }) => {
               <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Attack Statistics</h3>
               <div className="space-y-4">
                 <div className="p-4 rounded-xl bg-white/5">
-                  <p className="text-xs text-white/50 mb-1">Attack Success Rate</p>
+                  <p className="text-xs text-white/50 mb-1">Success Rate</p>
                   <div className="flex items-end gap-2">
-                    <span className="text-3xl font-bold text-neural-danger">{attackSuccess.toFixed(1)}%</span>
+                    <span className="text-3xl font-bold text-neural-danger">{attackSuccess.toFixed(0)}%</span>
+                    <span className="text-sm text-white/40 mb-1">({successCount}/{attackCount})</span>
                   </div>
                 </div>
                 <div className="p-4 rounded-xl bg-white/5">
-                  <p className="text-xs text-white/50 mb-1">Perturbation Magnitude</p>
-                  <div className="flex items-end gap-2">
-                    <span className="text-3xl font-bold text-neural-primary">{(epsilon * 255).toFixed(1)}</span>
-                    <span className="text-sm text-white/40 mb-1">/ 255</span>
-                  </div>
+                  <p className="text-xs text-white/50 mb-1">Perturbation</p>
+                  <span className="text-3xl font-bold text-neural-primary">{(epsilon * 255).toFixed(1)}</span>
+                  <span className="text-sm text-white/40"> / 255</span>
                 </div>
                 <div className="p-4 rounded-xl bg-white/5">
                   <p className="text-xs text-white/50 mb-1">Iterations</p>
-                  <div className="flex items-end gap-2">
-                    <span className="text-3xl font-bold text-neural-cyan">{confidenceHistory.length}</span>
-                  </div>
+                  <span className="text-3xl font-bold text-neural-cyan">{confidenceHistory.length}</span>
                 </div>
               </div>
             </div>
 
             <div className="glass-panel p-6">
-              <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Classification Output</h3>
+              <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Classification</h3>
               <div className="space-y-3">
+                <div className="p-3 rounded-xl bg-neural-primary/10 border border-neural-primary/30">
+                  <p className="text-xs text-white/50 mb-1">Original Prediction</p>
+                  <p className="text-lg font-semibold text-white">{originalPrediction.label}</p>
+                  <p className="text-sm text-neural-primary">{originalPrediction.confidence.toFixed(1)}%</p>
+                </div>
                 {(predictions.length > 0 ? predictions : [
-                  { label: 'tench', confidence: 97.2, original: true },
-                  { label: '-', confidence: 0, original: false },
-                  { label: '-', confidence: 0, original: false }
+                  { label: 'Loading...', confidence: 0 },
+                  { label: '-', confidence: 0 },
+                  { label: '-', confidence: 0 }
                 ]).slice(0, 5).map((item, index) => (
-                  <div key={item.label + index} className={`p-3 rounded-xl ${index === 0 ? 'bg-white/10 border border-white/20' : 'bg-white/5'}`}>
-                    <div className="flex justify-between mb-2">
-                      <span className={`text-sm ${index === 0 ? 'text-white font-medium' : 'text-white/60'}`}>
+                  <div key={index} className={`p-2 rounded-xl ${index === 0 ? 'bg-white/10' : 'bg-white/5'}`}>
+                    <div className="flex justify-between mb-1">
+                      <span className={`text-sm ${index === 0 ? 'text-white' : 'text-white/60'}`}>
                         {item.label}
-                        {item.original && index === 0 && <span className="ml-2 text-xs text-neural-success">✓ Original</span>}
-                        {index === 0 && !item.original && <span className="ml-2 text-xs text-neural-warning">New Top</span>}
+                        {index === 0 && <span className="ml-2 text-xs text-neural-warning">Adversarial</span>}
                       </span>
                       <span className={`text-sm font-mono ${index === 0 ? 'text-neural-primary' : 'text-white/40'}`}>
                         {item.confidence > 0 ? `${item.confidence.toFixed(1)}%` : '-'}
                       </span>
                     </div>
-                    <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div className="h-1 bg-white/10 rounded-full overflow-hidden">
                       <motion.div
                         className={`h-full rounded-full ${index === 0 ? 'bg-neural-primary' : 'bg-white/30'}`}
                         animate={{ width: `${item.confidence || 0}%` }}
@@ -553,11 +521,9 @@ const Dashboard = ({ onBack }) => {
 
             <div className="glass-panel p-6">
               <h3 className="text-sm font-semibold text-white/70 uppercase tracking-wider mb-4">Attack Log</h3>
-              <div className="space-y-2 max-h-[150px] overflow-y-auto font-mono text-xs">
+              <div className="space-y-2 max-h-[120px] overflow-y-auto font-mono text-xs">
                 {attackLog.length === 0 ? (
-                  <div className="p-2 rounded bg-white/5 text-white/40">
-                    [SYS] Ready for attack simulation
-                  </div>
+                  <div className="p-2 rounded bg-white/5 text-white/40">[SYS] Ready</div>
                 ) : (
                   attackLog.map((log, i) => (
                     <div
@@ -565,7 +531,6 @@ const Dashboard = ({ onBack }) => {
                       className={`p-2 rounded ${
                         log.type === 'danger' ? 'bg-neural-danger/10 text-neural-danger' :
                         log.type === 'success' ? 'bg-neural-success/10 text-neural-success' :
-                        log.type === 'attack' ? 'bg-neural-warning/10 text-neural-warning' :
                         'bg-white/5 text-white/60'
                       }`}
                     >
