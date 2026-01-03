@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # FastAPI Backend
+  api:
+    build: ./backend
+    container_name: adversarial-x-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend (for local development with backend)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: adversarial-x-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+      - VITE_WS_URL=ws://localhost:8000/ws
+      - VITE_USE_MOCK=false
+    depends_on:
+      - api
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+
+# Optional: Add Redis for caching, PostgreSQL for persistence
+#  redis:
+#    image: redis:alpine
+#    ports:
+#      - "6379:6379"
